@@ -1,0 +1,17 @@
+Introduction to Machine Learning
+
+Machine learning is a subset of artificial intelligence that enables systems to learn and improve from experience without being explicitly programmed. It focuses on developing computer programs that can access data and use it to learn for themselves.
+
+Types of Machine Learning
+
+Supervised learning uses labeled training data to learn a mapping from inputs to outputs. Common examples include image classification, spam detection, and price prediction.
+
+Unsupervised learning finds patterns in data without labels. Clustering algorithms like K-means group similar data points together without being told what the groups should be.
+
+Reinforcement learning trains agents to make decisions by rewarding correct actions and penalizing incorrect ones. It powers game-playing AI systems like AlphaGo.
+
+Neural Networks
+
+Neural networks are computing systems inspired by biological neural networks in animal brains. They consist of layers of interconnected nodes that process information using connectionist approaches to computation.
+
+Deep learning uses neural networks with many layers to learn representations of data with multiple levels of abstraction.
