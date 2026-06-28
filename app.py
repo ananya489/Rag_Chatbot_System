@@ -8,27 +8,26 @@ from rag.chunker import load_and_chunk
 from rag.embedder import load_embedder
 from rag.retriever import (
     get_chroma_client,
+    get_or_create_collection,
     ingest_chunks,
-    retrieve
+    retrieve,
 )
 from rag.prompt_builder import build_prompt
 from rag.query_expander import expand_query
+
 from llm.ollama_llm import OllamaLLM
 
 
-
-# ---------------- Page Config ----------------
+# ---------------- PAGE CONFIG ----------------
 
 st.set_page_config(
-    page_title="RAG Chat",
+    page_title="Document Intelligence Chatbot",
     page_icon="🔍",
     layout="wide"
 )
 
 
-
-# ---------------- Load Resources ----------------
-
+# ---------------- LOAD RESOURCES ----------------
 
 @st.cache_resource
 def load_resources():
@@ -40,6 +39,17 @@ def load_resources():
     client = get_chroma_client()
 
     llm = OllamaLLM()
+
+
+    if not llm.health_check():
+
+        st.warning(
+            f"Ollama not connected.\n\n"
+            f"Run:\n"
+            f"ollama serve\n\n"
+            f"Then:\n"
+            f"ollama pull {config.OLLAMA_MODEL}"
+        )
 
 
     chunks = load_and_chunk()
@@ -58,64 +68,62 @@ def load_resources():
 
 
 
-
-
-# ---------------- Session State ----------------
+# ---------------- SESSION ----------------
 
 
 def init_session_state():
 
-    if "session_id" not in st.session_state:
+    defaults = {
 
-        st.session_state.session_id = None
+        "session_id": None,
 
+        "messages": [],
 
-    if "messages" not in st.session_state:
+        "sessions_list": [],
 
-        st.session_state.messages = []
+        "last_chunks": []
 
-
-    if "sessions_list" not in st.session_state:
-
-        st.session_state.sessions_list = []
+    }
 
 
-    if "last_chunks" not in st.session_state:
+    for key,value in defaults.items():
 
-        st.session_state.last_chunks = []
+        if key not in st.session_state:
 
+            st.session_state[key] = value
 
 
 
 
 def start_new_session():
 
-    session_id = str(uuid.uuid4())
+    sid = str(uuid.uuid4())
 
 
     database.create_session(
-        session_id,
+        sid,
         title="New chat"
     )
 
 
-    st.session_state.session_id = session_id
+    st.session_state.session_id = sid
 
     st.session_state.messages = []
+
+    st.session_state.last_chunks = []
 
     st.session_state.sessions_list = database.list_sessions()
 
 
 
 
+def load_session(sid):
 
-def load_session(session_id):
-
-    st.session_state.session_id = session_id
+    st.session_state.session_id = sid
 
 
     history = database.get_history(
-        session_id,
+        sid,
         limit=100
     )
 
@@ -123,16 +131,13 @@ def load_session(session_id):
     st.session_state.messages = [
 
         {
-            "role": msg["role"],
-            "content": msg["content"]
+            "role":m["role"],
+            "content":m["content"]
         }
 
-        for msg in history
+        for m in history
 
     ]
-
-
-
 
 
 
@@ -147,30 +152,28 @@ def process_query_stream(
 ):
 
 
-    session_id = st.session_state.session_id
+    sid = st.session_state.session_id
 
-
-
-    # Load previous chat
 
     history = database.get_history(
-        session_id
+        sid
     )
 
 
+    # query expansion
+
+    try:
+
+        expanded_query = expand_query(
+            query,
+            history
+        )
+
+    except Exception:
+
+        expanded_query = query
 
 
-    # -------- Query Expansion --------
-
-    expanded_query = expand_query(
-        query,
-        history
-    )
-
-
-
-
-    # Retrieve documents
 
     chunks = retrieve(
         expanded_query,
@@ -180,9 +183,6 @@ def process_query_stream(
 
 
 
-
-    # Build prompt
-
     prompt = build_prompt(
         chunks,
         history,
@@ -191,54 +191,42 @@ def process_query_stream(
 
 
 
+    answer = []
 
-    answer_tokens = []
-
-
-
-    # Stream response from Ollama
 
     for token in llm.stream(prompt):
 
-        answer_tokens.append(token)
+        answer.append(token)
 
         yield token
 
 
 
-
-    answer = "".join(answer_tokens)
-
+    final_answer = "".join(answer)
 
 
-
-
-    # Save user message
 
     database.save_message(
-        session_id,
+        sid,
         "user",
         query
     )
 
 
-
-
-    # Save assistant message
-
     database.save_message(
 
-        session_id,
+        sid,
 
         "assistant",
 
-        answer,
+        final_answer,
 
         sources=[
 
             {
-                "source": c["source"],
-                "score": c["score"]
+                "source":c["source"],
+                "score":c["score"]
+
             }
 
             for c in chunks
@@ -248,17 +236,11 @@ def process_query_stream(
     )
 
 
-
-
-    # Save retrieved chunks for UI
-
     st.session_state.last_chunks = chunks
 
 
 
-
-
-    # Update title
+    # update title
 
     sessions = database.list_sessions()
 
@@ -267,7 +249,7 @@ def process_query_stream(
 
         (
             s for s in sessions
-            if s["session_id"] == session_id
+            if s["session_id"] == sid
         ),
 
         None
@@ -275,13 +257,11 @@ def process_query_stream(
     )
 
 
-
-    if current and current["title"] == "New chat":
-
+    if current and current["title"]=="New chat":
 
         database.update_session_title(
 
-            session_id,
+            sid,
 
             query[:50]
 
@@ -289,44 +269,27 @@ def process_query_stream(
 
 
 
-
     st.session_state.sessions_list = database.list_sessions()
 
 
 
+# ---------------- SIDEBAR ----------------
 
 
-
-# ---------------- Sidebar ----------------
-
-
-def render_sidebar(
-        model,
-        client,
-        llm
-):
+def render_sidebar(llm,client):
 
 
     with st.sidebar:
 
 
-        st.markdown(
-            "## 🔍 RAG Chat"
-        )
-
+        st.title("🔍 RAG Chat")
 
 
 
         if st.button(
-
-            "＋ New chat",
-
-            use_container_width=True,
-
-            type="primary"
-
+            "New Chat",
+            use_container_width=True
         ):
-
 
             start_new_session()
 
@@ -334,35 +297,21 @@ def render_sidebar(
 
 
 
-
-
         st.divider()
-
 
 
 
         if llm.health_check():
 
             st.success(
-        f"Ollama · {config.OLLAMA_MODEL}",
-        icon="✅"
-    )
+                f"Ollama : {config.OLLAMA_MODEL}"
+            )
 
         else:
 
             st.error(
-        "Ollama not reachable",
-        icon="❌"
-    )
-
-
-            st.caption(
-
-                "Run: ollama serve"
-
+                "Ollama Offline"
             )
-
-
 
 
 
@@ -370,52 +319,50 @@ def render_sidebar(
 
 
 
-        st.markdown(
-            "**Past conversations**"
+        st.subheader(
+            "Chats"
         )
 
 
+        sessions = database.list_sessions()
 
 
-        sessions = (
-
-            st.session_state.sessions_list
-
-            or database.list_sessions()
-
-        )
+        for s in sessions:
 
 
+            active = (
+                s["session_id"]
+                ==
+                st.session_state.session_id
+            )
 
 
-        for session in sessions:
+            label = (
+
+                "▶ "
+
+                if active
+
+                else ""
+
+            ) + s["title"]
+
 
 
             if st.button(
-
-                session["title"],
-
-                key=session["session_id"],
-
-                use_container_width=True
-
+                label,
+                key=s["session_id"]
             ):
 
-
                 load_session(
-
-                    session["session_id"]
-
+                    s["session_id"]
                 )
 
                 st.rerun()
 
 
 
-
-
         st.divider()
-
 
 
 
@@ -424,106 +371,99 @@ def render_sidebar(
         ):
 
 
-            from rag.retriever import get_or_create_collection
-
-
-
             col = get_or_create_collection(
                 client
             )
 
 
             st.metric(
-
-                "Chunks indexed",
-
+                "Chunks",
                 col.count()
-
             )
 
 
 
-            st.caption(
-
-                f"Documents: {config.DOCUMENTS_DIR}"
-
-            )
+        with st.expander(
+            "Retrieval Debug"
+        ):
 
 
+            chunks = st.session_state.last_chunks
+
+
+            if chunks:
+
+                for c in chunks:
+
+                    score = max(
+                        0,
+                        min(
+                            c["score"],
+                            1
+                        )
+                    )
+
+
+                    st.progress(
+                        score,
+                        text=f"{c['source']} {c['score']:.2f}"
+                    )
+
+
+            else:
+
+                st.caption(
+                    "No retrieval yet"
+                )
 
 
 
-
-# ---------------- Chat UI ----------------
-
+# ---------------- CHAT ----------------
 
 
-def render_chat(
-        model,
-        client,
-        llm
-):
+def render_chat(model,client,llm):
 
 
     st.title(
-        "RAG Chat System"
+        "Document Intelligence Chatbot"
     )
-
-
 
 
     if not st.session_state.session_id:
 
 
         st.info(
-            "Click + New chat to start"
+            "Click New Chat"
         )
-
 
         return
 
 
 
-
-
-    # Display old messages
-
-
     for msg in st.session_state.messages:
-
 
         with st.chat_message(
             msg["role"]
         ):
 
-
-            st.markdown(
+            st.write(
                 msg["content"]
             )
 
 
 
-
-
     query = st.chat_input(
-
-        "Ask something about your documents..."
-
+        "Ask about documents..."
     )
 
 
-
-
-
     if query:
-
 
 
         st.session_state.messages.append(
 
             {
                 "role":"user",
-
                 "content":query
             }
 
@@ -531,28 +471,16 @@ def render_chat(
 
 
 
-
         with st.chat_message("user"):
 
-
-            st.markdown(query)
-
-
-
-
-
-        answer = ""
-
-
+            st.write(query)
 
 
 
         with st.chat_message("assistant"):
 
 
-
             try:
-
 
 
                 answer = st.write_stream(
@@ -560,11 +488,8 @@ def render_chat(
                     process_query_stream(
 
                         query,
-
                         model,
-
                         client,
-
                         llm
 
                     )
@@ -573,71 +498,12 @@ def render_chat(
 
 
 
+            except Exception as e:
 
 
-                chunks = st.session_state.last_chunks
-
-
-
-
-
-                if chunks:
-
-
-
-                    with st.expander(
-
-                        f"Sources ({len(chunks)})"
-
-                    ):
-
-
-
-                        for chunk in chunks:
-
-
-                            st.markdown(
-
-                                f"""
-
-**{chunk['source']}**
-
-Relevance:
-`{chunk['score']:.2f}`
-
-                                """
-
-                            )
-
-
-                            st.caption(
-
-                                chunk["text"][:200]
-
-                                +
-
-                                "..."
-
-                            )
-
-
-
-
-            except RuntimeError as e:
-
-
-                answer = str(e)
-
+                answer = f"Error: {e}"
 
                 st.error(answer)
-
-
-                st.caption(
-
-                    "Check Ollama: ollama serve"
-
-                )
-
 
 
 
@@ -645,22 +511,15 @@ Relevance:
         st.session_state.messages.append(
 
             {
-
                 "role":"assistant",
-
                 "content":answer
-
             }
 
         )
 
 
 
-
-
-
-# ---------------- Main ----------------
-
+# ---------------- MAIN ----------------
 
 
 def main():
@@ -669,39 +528,24 @@ def main():
     init_session_state()
 
 
-
-    model, client, llm = load_resources()
-
+    model,client,llm = load_resources()
 
 
 
     render_sidebar(
-
-        model,
-
-        client,
-
-        llm
-
+        llm,
+        client
     )
-
-
 
 
     render_chat(
-
         model,
-
         client,
-
         llm
-
     )
 
 
 
-
-
-if __name__ == "__main__":
+if __name__=="__main__":
 
     main()
