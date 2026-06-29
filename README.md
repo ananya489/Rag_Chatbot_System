@@ -391,7 +391,6 @@ python test_retrieval.py
 ## License
 
 MIT License — see [LICENSE](LICENSE) for details.
-
 ---
 
 ## Author
