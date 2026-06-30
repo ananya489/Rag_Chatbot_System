@@ -1,145 +1,290 @@
 import config
 
 
-# ── System prompt ─────────────────────────────────────────────────────────────
+# -------------------------------------------------
+# SYSTEM PROMPT
+# -------------------------------------------------
 
-SYSTEM_PROMPT = """You are a precise and helpful assistant. Your job is to answer \
-questions based strictly on the context documents provided below.
+SYSTEM_PROMPT = """
+You are a precise knowledge-base assistant.
 
-Rules you must follow:
-- Answer ONLY using information found in the provided context.
-- If the context does not contain enough information to answer, say clearly: \
-"I don't have enough information in my knowledge base to answer that."
-- Never invent facts, statistics, or details not present in the context.
-- When you use information from a specific source, mention it naturally \
-(e.g. "According to machine_learning.txt...").
-- Keep answers clear, concise, and well-structured.
-- If the question is a follow-up, use the conversation history to understand \
-what the user is referring to."""
+Your job is to answer questions ONLY using the context documents provided below.
+
+RULES:
+1. Use only information from the provided context documents.
+2. Do not use outside knowledge.
+3. If the answer is not present in the context, say:
+   "I don't have information about that in my knowledge base."
+4. Never guess or create fake facts, numbers, quotes, or sources.
+5. When answering, cite sources naturally:
+   - With page number:
+     (Source: filename, page N)
+   - Without page number:
+     (Source: filename)
+6. For follow-up questions, use conversation history to understand references.
+7. Keep answers clear and concise.
+8. Never mention a page number unless it exists in the provided context.
+"""
 
 
-# ── Context formatter ─────────────────────────────────────────────────────────
+# -------------------------------------------------
+# CONTEXT FORMATTER
+# -------------------------------------------------
 
 def format_context(chunks: list[dict]) -> str:
     """
-    Format retrieved chunks into a clearly labeled context block.
-
-    Each chunk is separated and labeled with its source file so the
-    LLM can reference it accurately in the answer.
-
-    Args:
-        chunks: List of dicts from retriever.retrieve()
-                Each has: text, source, score
-
-    Returns:
-        A formatted multi-line string ready to embed in the prompt.
-
-    Example output:
-        [Source: machine_learning.txt | Relevance: 0.821]
-        Machine learning is a subset of artificial intelligence...
-
-        [Source: neural_nets.txt | Relevance: 0.743]
-        Neural networks are computing systems inspired by...
+    Convert retrieved chunks into LLM readable context.
     """
+
     if not chunks:
         return "No relevant context found in the knowledge base."
 
+
     parts = []
+
+
     for chunk in chunks:
+
+
+        page_info = ""
+
+
+        if chunk.get("page"):
+
+            page_info = (
+                f", page {chunk['page']}"
+            )
+
+
         header = (
-            f"[Source: {chunk['source']} | "
-            f"Relevance: {chunk.get('score', 0):.2f}]"
+            f"[Source: {chunk['source']}"
+            f"{page_info} | "
+            f"Relevance: {chunk.get('score',0):.2f}]"
         )
-        parts.append(f"{header}\n{chunk['text']}")
+
+
+        parts.append(
+            f"{header}\n{chunk['text']}"
+        )
+
 
     return "\n\n".join(parts)
 
 
-# ── History formatter ─────────────────────────────────────────────────────────
 
-def format_history(history: list[dict]) -> str:
-    """
-    Format chat history into a readable conversation transcript.
 
-    Args:
-        history: List of dicts from database.get_history()
-                 Each has: role ('user' or 'assistant'), content
+# -------------------------------------------------
+# HISTORY FORMATTER
+# -------------------------------------------------
 
-    Returns:
-        A formatted conversation string, or empty string if no history.
+def format_history(history:list[dict]) -> str:
 
-    Example output:
-        User: What is machine learning?
-        Assistant: Machine learning is a field of AI that...
 
-        User: What about deep learning?
-        Assistant: Deep learning is a subset of machine learning...
-    """
     if not history:
+
         return ""
 
-    lines = []
+
+
+    messages=[]
+
+
+
     for msg in history:
-        role    = "User" if msg["role"] == "user" else "Assistant"
-        content = msg["content"].strip()
-        lines.append(f"{role}: {content}")
-
-    return "\n\n".join(lines)
 
 
-# ── Main builder ──────────────────────────────────────────────────────────────
+        role = (
 
-def build_prompt(
-    chunks:  list[dict],
-    history: list[dict],
-    query:   str,
-) -> str:
-    """
-    Assemble the complete prompt from all three inputs.
+            "User"
 
-    Structure (in order):
-      1. System role + grounding instruction
-      2. Retrieved context with source labels
-      3. Conversation history (if any)
-      4. Current user question
+            if msg["role"]=="user"
 
-    Args:
-        chunks:  Retrieved and re-ranked chunks from retriever.retrieve()
-        history: Past messages from database.get_history()
-        query:   The current user question
+            else
 
-    Returns:
-        A single string ready to send to any LLM.
-    """
-    context_block  = format_context(chunks)
-    history_block  = format_history(history)
+            "Assistant"
 
-    # Build the prompt section by section
-    sections = [SYSTEM_PROMPT]
-
-    sections.append(
-        "--- CONTEXT DOCUMENTS ---\n" + context_block
-    )
-
-    if history_block:
-        sections.append(
-            "--- CONVERSATION HISTORY ---\n" + history_block
         )
 
+
+        messages.append(
+
+            f"{role}: {msg['content'].strip()}"
+
+        )
+
+
+    return "\n\n".join(messages)
+
+
+
+
+# -------------------------------------------------
+# PROMPT BUILDER
+# -------------------------------------------------
+
+def build_prompt(
+        chunks:list[dict],
+        history:list[dict],
+        query:str
+):
+
+
+    context = format_context(chunks)
+
+
+    history_text = format_history(history)
+
+
+
+    sections=[
+
+        SYSTEM_PROMPT,
+
+        "--- CONTEXT DOCUMENTS ---\n"
+        + context
+
+    ]
+
+
+
+    if history_text:
+
+
+        sections.append(
+
+            "--- CONVERSATION HISTORY ---\n"
+            + history_text
+
+        )
+
+
+
     sections.append(
+
         "--- CURRENT QUESTION ---\n"
+
         f"Question: {query.strip()}\n\n"
+
         "Answer:"
+
     )
 
-    prompt = "\n\n".join(sections)
 
-    # Debug: log prompt length so you can tune chunk/history sizes
+
+    prompt="\n\n".join(sections)
+
+
+
     print(
+
         f"[prompt_builder] Prompt assembled | "
         f"chunks={len(chunks)} | "
         f"history_turns={len(history)} | "
         f"total_chars={len(prompt)}"
+
     )
 
+
+
     return prompt
+
+
+
+
+# -------------------------------------------------
+# QUERY EXPANSION
+# -------------------------------------------------
+
+def expand_query(
+        query:str,
+        history:list[dict]
+)->str:
+
+
+    if not history or len(query.split()) > 8:
+
+        return query
+
+
+
+    vague_words={
+
+        "it",
+        "this",
+        "that",
+        "they",
+        "them",
+        "those",
+        "the second",
+        "the first",
+        "the last",
+        "what about"
+
+    }
+
+
+
+    query_lower=query.lower()
+
+
+
+    if not any(
+        word in query_lower
+        for word in vague_words
+    ):
+
+        return query
+
+
+
+
+    last_assistant = next(
+
+        (
+
+            m["content"]
+
+            for m in reversed(history)
+
+            if m["role"]=="assistant"
+
+        ),
+
+        ""
+
+    )
+
+
+
+    if last_assistant:
+
+
+        first_sentence = (
+
+            last_assistant
+            .split(".")[0]
+
+        )
+
+
+        expanded=(
+
+            f"{query} "
+            f"(context: {first_sentence})"
+
+        )
+
+
+        print(
+
+            f"[prompt_builder] "
+            f"Query expanded: {expanded[:100]}"
+
+        )
+
+
+        return expanded
+
+
+
+    return query
