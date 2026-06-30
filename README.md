@@ -1,125 +1,116 @@
-![Python](https://img.shields.io/badge/python-3.11+-blue)
+# RAG Chatbot System — Document Intelligence Chatbot
 
+![Python](https://img.shields.io/badge/python-3.11+-blue?logo=python&logoColor=white)
+![Streamlit](https://img.shields.io/badge/streamlit-1.35-red?logo=streamlit&logoColor=white)
+![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-![Streamlit](https://img.shields.io/badge/streamlit-1.35-red)
-# RAG Chat System
-
-> A production-grade, locally-hosted Retrieval-Augmented Generation (RAG) chat system built with Streamlit, ChromaDB, SQLite, and Ollama. Ask questions about your own documents and get accurate, cited answers — with full conversation memory across sessions.
+A Retrieval-Augmented Generation (RAG) chatbot that turns any collection of documents into a queryable knowledge base. Upload PDFs, markdown, or text files, ask questions in natural language, and get answers grounded strictly in your own content — with source citations, persistent chat history, and a live analytics dashboard.
 
 ---
 
 ## Overview
 
-Most LLMs answer from training data alone — they hallucinate when asked about your specific documents, internal knowledge, or recent information. **RAG Chat System** solves this by grounding every answer in your actual documents.
+Large language models are powerful but limited to what they were trained on — they cannot answer questions about your private documents, internal reports, or recent research, and they tend to hallucinate when they don't know something.
 
-The pipeline works in two stages:
+**RAG Chatbot System** solves this by combining semantic search with local LLM generation. Documents are split into chunks, converted into vector embeddings, and stored in ChromaDB. When a user asks a question, the most relevant chunks are retrieved and passed to the LLM as context — so every answer is grounded in real, retrievable evidence rather than the model's memory.
 
-**Ingestion (once):** Your documents are split into overlapping chunks → converted to 384-dimensional semantic vectors via `all-MiniLM-L6-v2` → stored in ChromaDB on disk.
-
-**Query (every message):** Your question is embedded with the same model → the most relevant chunks are retrieved via cosine similarity → re-ranked by relevance score → combined with your conversation history into a structured prompt → sent to a local Ollama LLM → streamed back token by token.
-
-Everything runs locally. No API keys. No cloud. No data leaves your machine.
+The system runs entirely locally using Ollama for inference, meaning no API keys, no per-token costs, and no data ever leaving your machine.
 
 ---
 
 ## Features
 
-- **Semantic search** — finds relevant content even when wording differs from the document
-- **Streaming responses** — tokens appear in real time, no waiting for full generation
-- **Persistent chat memory** — conversations saved in SQLite, accessible across restarts
-- **Multi-session support** — maintain separate conversations, switch between them via sidebar
-- **Query expansion** — vague follow-up questions resolved using conversation context before retrieval
-- **Source citations** — every answer shows which document chunks were used and their relevance score
-- **Re-ranking** — top-K candidates filtered by similarity threshold before prompting the LLM
-- **Pluggable LLM layer** — swap Ollama for any provider by implementing one abstract interface
-- **Zero external dependencies** — runs entirely offline after initial model downloads
+- **Multi-format document ingestion** — PDF, TXT, MD, PY, CSV, and HTML files supported out of the box
+- **Automatic chunking and embedding** — documents are split, embedded, and indexed without manual configuration
+- **Semantic retrieval with re-ranking** — ChromaDB cosine similarity search filtered by relevance threshold
+- **Query expansion** — vague follow-up questions are resolved using conversation context before retrieval
+- **Strict grounding prompt engineering** — answers are generated only from retrieved context, reducing hallucination
+- **Source-aware responses** — every answer cites the document (and page number, for PDFs) it came from
+- **Persistent multi-session chat memory** — conversations survive app restarts via SQLite
+- **Full session management** — create, rename, and delete conversations from the UI
+- **In-app document upload** — add files directly through the Streamlit sidebar, indexed immediately
+- **Analytics dashboard** — tracks total queries, average response time, and most-referenced sources
+- **Conversation export** — download any chat as a Markdown file
+- **Streaming responses** — answers appear token by token in real time
+- **Containerized deployment** — Docker and Docker Compose configuration included
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        INGESTION PIPELINE                        │
-│  Documents → Chunker → Metadata tag → Embedder → ChromaDB       │
-│  (runs once on startup, skips unchanged documents)               │
-└─────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────┐
-│                         QUERY PIPELINE                           │
-│                                                                   │
-│  User question                                                    │
-│       │                                                           │
-│       ▼                                                           │
-│  Query Expander ──► Embedder ──► ChromaDB (top-K retrieval)      │
-│                                       │                           │
-│                                       ▼                           │
-│                                  Re-ranker                        │
-│                                       │                           │
-│  SQLite (history) ────────────────────┤                           │
-│                                       ▼                           │
-│                               Prompt Builder                      │
-│                          [system + context + history + query]     │
-│                                       │                           │
-│                                       ▼                           │
-│                              Ollama LLM (stream)                  │
-│                                       │                           │
-│                    ┌──────────────────┤                           │
-│                    │                  ▼                           │
-│               SQLite (save)     Streamlit UI                      │
-└─────────────────────────────────────────────────────────────────┘
+                    User
+                     │
+                     ▼
+              Streamlit UI
+                     │
+                     ▼
+              RAG Pipeline
+                     │
+                     ▼
+          Query Expansion + Retriever
+                     │
+                     ▼
+                ChromaDB
+          (vector similarity search)
+                     │
+                     ▼
+             Prompt Builder
+     (context + chat history + question)
+                     │
+                     ▼
+              Ollama LLM
+              (qwen2.5:7b)
+                     │
+                     ▼
+                 Response
+          (streamed + source citations)
 ```
+
+Chat history and session metadata are persisted independently in SQLite, read and written on every turn so conversations remain available across restarts.
 
 ---
 
 ## Tech Stack
 
-| Layer | Technology | Purpose |
-|---|---|---|
-| UI | Streamlit 1.35 | Chat interface, session sidebar, streaming display |
-| Embeddings | sentence-transformers `all-MiniLM-L6-v2` | 384-dim semantic vectors |
-| Vector store | ChromaDB 0.5 | Persistent cosine similarity search |
-| Chat memory | SQLite (built-in) | Session and message persistence |
-| LLM | Ollama (`qwen2.5:7b`) | Local inference, streaming |
-| Language | Python 3.10+ | — |
+| Layer | Technology |
+|---|---|
+| Backend | Python 3.11 |
+| Frontend | Streamlit |
+| LLM | Ollama — qwen2.5:7b |
+| Embeddings | Sentence Transformers (`all-MiniLM-L6-v2`) |
+| Vector Database | ChromaDB |
+| Persistent Storage | SQLite |
+| Deployment | Docker, Docker Compose |
 
 ---
 
-## Folder Structure
+## Project Structure
 
 ```
-rag-chat-system/
+rag_chatbot_system/
 │
-├── app.py                      ← Streamlit entry point — run this
-├── config.py                   ← All settings, paths, model names
-├── database.py                 ← SQLite session and message CRUD
+├── app.py                   # Streamlit entry point — UI and orchestration
+├── config.py                # Centralized configuration and environment loading
+├── database.py               # SQLite session and chat history management
+├── analytics.py              # Query analytics and usage tracking
+├── requirements.txt
+├── Dockerfile
+├── docker-compose.yml
 │
 ├── rag/
-│   ├── chunker.py              ← Document loading and recursive splitting
-│   ├── embedder.py             ← sentence-transformers wrapper (single + batch)
-│   ├── retriever.py            ← ChromaDB queries, cosine similarity, re-ranking
-│   ├── prompt_builder.py       ← Assembles context + history + query into prompt
-│   └── query_expander.py       ← Resolves vague follow-ups using history context
+│   ├── chunker.py            # Document loading and chunking (PDF + text)
+│   ├── embedder.py           # Sentence-transformer embedding generation
+│   ├── retriever.py          # ChromaDB indexing and similarity retrieval
+│   ├── prompt_builder.py     # Context-aware prompt construction
+│   └── query_expander.py     # Follow-up query resolution
 │
 ├── llm/
-│   ├── base.py                 ← Abstract BaseLLM interface (generate + stream)
-│   └── ollama_llm.py           ← Concrete Ollama implementation
+│   └── ollama_llm.py         # Ollama LLM integration (streaming + generate)
 │
-├── data/
-│   ├── documents/              ← Drop your knowledge base files here
-│   └── chat.db                 ← SQLite database (auto-created)
-│
-├── chroma_db/                  ← ChromaDB vector store (auto-created)
-│
-├── test_chunk.py               ← Chunker unit tests
-├── test_llm.py                 ← LLM connectivity tests
-├── test_retrieval.py           ← Retrieval pipeline tests
-│
-├── .env                        ← Local config overrides (not committed)
-├── .env.example                ← Template for required environment variables
-├── .gitignore
-└── requirements.txt
+└── data/
+    └── documents/             # Knowledge base source files
 ```
 
 ---
@@ -128,278 +119,100 @@ rag-chat-system/
 
 ### Prerequisites
 
-- Python 3.10 or higher
-- [Ollama](https://ollama.com) installed and running
+- Python 3.11 or higher
+- [Ollama](https://ollama.com) installed
 
-### 1. Clone the repository
+### Setup
 
 ```bash
+# Clone the repository
 git clone https://github.com/ananya489/Rag_Chatbot_System.git
 cd Rag_Chatbot_System
-```
 
-### 2. Create a virtual environment
-
-```bash
+# Create and activate a virtual environment
 python -m venv venv
+source venv/bin/activate      # On Windows: venv\Scripts\activate
 
-# macOS / Linux
-source venv/bin/activate
-
-# Windows
-venv\Scripts\activate
-```
-
-### 3. Install dependencies
-
-```bash
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-### 4. Configure environment
-
-```bash
-cp .env.example .env
-# Edit .env if you want to change the model or Ollama URL
-```
-
 ---
 
-## Ollama Setup
+## Running Locally
 
-Install Ollama (if not already installed):
-
-```bash
-# macOS / Linux
-curl -fsSL https://ollama.com/install.sh | sh
-
-# Windows — download from https://ollama.com/download
-```
-
-Pull the model:
-
-```bash
-ollama pull qwen2.5:7b
-```
-
-Start the Ollama server (it may start automatically after installation):
+**1. Start Ollama and pull the model**
 
 ```bash
 ollama serve
+ollama pull qwen2.5:7b
 ```
 
-Verify it's working:
-
-```bash
-ollama run qwen2.5:7b "Hello, are you working?"
-```
-
-Ollama runs at `http://localhost:11434` by default. The app will show a green status indicator in the sidebar when it can reach it.
-
-**Alternative lightweight models:**
-
-```bash
-ollama pull llama3.2:3b     # Faster, smaller (2GB)
-ollama pull phi3:mini        # Good quality, efficient (2.3GB)
-```
-
-To use a different model, update `OLLAMA_MODEL` in your `.env` file.
-
----
-
-## Adding Documents
-
-Drop any supported files into the `data/documents/` folder before starting the app:
-
-```
-data/documents/
-├── company_handbook.txt
-├── research_paper.md
-├── api_documentation.md
-└── notes.txt
-```
-
-Supported formats: `.txt` `.md` `.py` `.csv` `.html`
-
-The app ingests all documents automatically on startup. Re-ingest happens only when files change.
-
----
-
-## Running the App
+**2. Launch the application**
 
 ```bash
 streamlit run app.py
 ```
 
-Open your browser at `http://localhost:8501`.
+**3. Open your browser**
 
-**First run workflow:**
-1. Ollama server must be running
-2. App loads embedding model (~90MB, cached after first download)
-3. Documents in `data/documents/` are chunked and indexed into ChromaDB
-4. Click **＋ New chat** in the sidebar to start a conversation
-5. Ask questions about your documents
+Navigate to `http://localhost:8501`
 
 ---
 
-## ChromaDB Setup
+## Docker Deployment
 
-ChromaDB requires no separate installation or server. It runs as an embedded library and stores vector data in the `chroma_db/` folder automatically. The folder is created on first run.
-
-To reset the vector store (e.g. after changing documents significantly):
+The project includes a full container setup with separate services for the application and the Ollama LLM backend.
 
 ```bash
-rm -rf chroma_db/
+docker compose up --build
 ```
 
-The app will re-ingest all documents on the next startup.
+This starts two containers:
 
----
+- **`ollama`** — runs the Ollama inference server, exposing port `11434`. Model weights persist in a named volume across restarts.
+- **`app`** — runs the Streamlit application on port `8501`, connected to the Ollama container over the internal Docker network.
 
-## Supported File Types
-
-| Extension | Description |
-|---|---|
-| `.txt` | Plain text files |
-| `.md` | Markdown documents |
-| `.py` | Python source files |
-| `.csv` | Comma-separated data |
-| `.html` | HTML pages (tags stripped) |
-
-PDF support is on the roadmap. To add a PDF manually, convert it first:
+After the containers are running, pull the model into the Ollama container once:
 
 ```bash
-# Using pdftotext (Linux/macOS)
-pdftotext your_file.pdf your_file.txt
+docker exec -it <ollama_container_name> ollama pull qwen2.5:7b
 ```
 
----
-
-## Environment Variables
-
-Copy `.env.example` to `.env` and configure:
-
-```env
-# LLM Configuration
-LLM_PROVIDER=ollama
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=qwen2.5:7b
-LLM_TEMPERATURE=0.7
-LLM_MAX_TOKENS=1024
-```
-
-All variables have sensible defaults — you only need to set what you want to override.
+Then open `http://localhost:8501` in your browser.
 
 ---
 
-## Screenshots
+## How to Use
 
-> _Add screenshots here after running the app_
+1. **Upload a document** — open the "Upload document" panel in the sidebar and add a PDF, TXT, MD, PY, CSV, or HTML file
+2. **Wait for indexing** — the file is chunked, embedded, and stored in ChromaDB automatically; a confirmation message appears once complete
+3. **Ask questions** — type a question about your document in the chat box and receive a streamed, grounded answer
+4. **View sources** — expand the "Sources" panel under any answer to see which document chunks (and page numbers, for PDFs) were used to generate it
 
-| Chat Interface | Session History | Source Citations |
-|---|---|---|
-| `screenshots/chat.png` | `screenshots/sessions.png` | `screenshots/sources.png` |
+## Example Questions
 
----
+Once a document is indexed, try asking:
 
-## How the RAG Pipeline Works
-
-**1. Chunking** — Documents are split into overlapping 500-character chunks with 50-character overlap. Overlap ensures sentences that cross chunk boundaries appear in both chunks, preserving context.
-
-**2. Embedding** — Each chunk is converted to a 384-dimensional vector using `all-MiniLM-L6-v2`. Semantically similar text produces vectors that are geometrically close, regardless of exact wording.
-
-**3. Storage** — Vectors, text, and metadata (source filename, chunk ID) are stored in ChromaDB using the HNSW index with cosine distance metric.
-
-**4. Query expansion** — Short or vague follow-up questions ("what about the second type?") are expanded using the previous assistant response before retrieval, improving relevance.
-
-**5. Retrieval** — The query is embedded with the same model, then ChromaDB returns the top-5 nearest vectors by cosine similarity. Results below a 0.3 similarity threshold are discarded.
-
-**6. Re-ranking** — The top-3 chunks after threshold filtering are passed to the prompt builder.
-
-**7. Prompt assembly** — A structured prompt is built: system role → grounding instruction → context chunks with source labels → conversation history → current question → "Answer:".
-
-**8. Generation** — The prompt is sent to Ollama, which streams tokens back. Streamlit renders each token as it arrives.
-
-**9. Persistence** — Both the user message and assistant answer are saved to SQLite with timestamps and source metadata.
-
----
-
-## Plugging In a Different LLM
-
-The LLM layer is fully abstracted. To add a new provider:
-
-1. Create `llm/your_provider.py`
-2. Subclass `BaseLLM` from `llm/base.py`
-3. Implement `generate(prompt: str) -> str` and `stream(prompt: str) -> Generator`
-4. Update `OLLAMA_MODEL` or add a new config key in `config.py`
-5. Change the import in `app.py` — nothing else in the codebase changes
-
-```python
-# Example: adding Groq support
-from llm.base import BaseLLM
-
-class GroqLLM(BaseLLM):
-    def generate(self, prompt: str) -> str:
-        # your implementation
-        ...
-
-    def stream(self, prompt: str):
-        # your implementation
-        ...
-```
+- "What is this document about?"
+- "Summarize this paper."
+- "Explain the important points."
+- "What does it say about [specific topic]?"
+- "Can you elaborate on the second point you mentioned?"
 
 ---
 
 ## Future Improvements
 
-- [ ] PDF ingestion support via `pypdf`
-- [ ] In-app document upload (drag and drop in Streamlit UI)
-- [ ] Ingestion fingerprint cache (skip re-embedding unchanged documents)
-- [ ] Analytics dashboard (query count, average response time, top sources)
-- [ ] Delete / rename sessions from the UI
-- [ ] Multi-document knowledge base selection
-- [ ] Hybrid search (BM25 + vector similarity)
-- [ ] Docker deployment with `docker-compose.yml`
-- [ ] Export conversation as PDF or Markdown
-
----
-
-## Scalability Notes
-
-The current architecture is designed for single-user local deployment. For production scaling:
-
-- **Vector store:** Replace ChromaDB with Qdrant or Weaviate for multi-user concurrent access
-- **Database:** Migrate SQLite to PostgreSQL for concurrent writes
-- **LLM:** Switch `OllamaLLM` to `GroqLLM` or `OpenAILLM` for higher throughput
-- **Embedding:** Use a GPU-accelerated embedding server for faster batch ingestion
-- **Deployment:** Containerise with Docker, deploy behind nginx with `--server.headless true`
-
-The LLM abstraction layer and modular RAG package make all of these migrations possible without touching application logic.
-
----
-
-## Running Tests
-
-```bash
-# Test chunking pipeline
-python test_chunk.py
-
-# Test Ollama connectivity and generation
-python test_llm.py
-
-# Test ChromaDB retrieval pipeline
-python test_retrieval.py
-```
+- [ ] User authentication and access control
+- [ ] Cloud deployment (AWS / GCP / Azure)
+- [ ] Improved retrieval re-ranking with cross-encoder models
+- [ ] Multi-user support with isolated knowledge bases
+- [ ] Hybrid search combining keyword and semantic retrieval
+- [ ] OCR support for scanned PDFs
 
 ---
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
----
-
-## Author
-
-Built by [@ananya489](https://github.com/ananya489) as part of a B.Tech CSE internship evaluation project.
-
-**Stack:** Python · Streamlit · ChromaDB · sentence-transformers · SQLite · Ollama
+This project is licensed under the [MIT License](LICENSE).
