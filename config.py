@@ -20,8 +20,8 @@ CHUNK_SIZE    = 500    # Max characters per chunk
 CHUNK_OVERLAP = 50     # Characters shared between adjacent chunks
 
 # ── Retrieval ─────────────────────────────────────────────────────────────────
-RETRIEVAL_TOP_K = 5    # Chunks fetched from ChromaDB
-RERANK_TOP_N    = 3    # Chunks kept after re-ranking
+RETRIEVAL_TOP_K = 8    # Chunks fetched from ChromaDB
+RERANK_TOP_N    = 5    # Chunks kept after re-ranking
 
 # ── Chat memory ───────────────────────────────────────────────────────────────
 HISTORY_LIMIT = 10     # Max past messages loaded into prompt
