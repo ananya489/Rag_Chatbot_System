@@ -1,173 +1,761 @@
+import hashlib
+import json
+from pathlib import Path
+
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 from sentence_transformers import SentenceTransformer
 
-from rag.embedder import embed_text
 import config
+from rag.embedder import embed_text, embed_batch
 
 
 COLLECTION_NAME = "rag_documents"
 
 
+# ---------------------------------------------------------
+# Chroma Client
+# ---------------------------------------------------------
+
 def get_chroma_client() -> chromadb.PersistentClient:
-    """
-    Create or open the ChromaDB persistent client.
 
-    PersistentClient stores vectors on disk at config.CHROMA_PATH.
-    The data survives restarts — you only ingest documents once.
-
-    Returns:
-        A ChromaDB client connected to the local vector store.
-    """
     return chromadb.PersistentClient(
+
         path=str(config.CHROMA_PATH),
-        settings=ChromaSettings(anonymized_telemetry=False),
+
+        settings=ChromaSettings(
+            anonymized_telemetry=False
+        )
+
     )
 
 
-def get_or_create_collection(client: chromadb.PersistentClient):
-    """
-    Get the documents collection, creating it if it doesn't exist.
-    We use cosine similarity — standard for sentence embeddings.
-    """
+
+# ---------------------------------------------------------
+# Collection
+# ---------------------------------------------------------
+
+def get_or_create_collection(client):
+
     return client.get_or_create_collection(
+
         name=COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine"},
+
+        metadata={
+            "hnsw:space": "cosine"
+        }
+
     )
 
+
+
+# ---------------------------------------------------------
+# Document Fingerprint Cache
+# ---------------------------------------------------------
+
+def get_documents_fingerprint(
+        documents_path: str
+) -> str:
+
+
+    path = Path(documents_path)
+
+
+    if not path.exists():
+
+        return "no_documents"
+
+
+
+    supported = {
+
+        ".txt",
+        ".md",
+        ".py",
+        ".csv",
+        ".html",
+        ".pdf"
+
+    }
+
+
+
+    files = []
+
+
+
+    for file in path.iterdir():
+
+        if file.suffix.lower() in supported:
+
+
+            files.append(
+
+                {
+
+                    "name": file.name,
+
+                    "size": file.stat().st_size,
+
+                    "mtime": round(
+                        file.stat().st_mtime,
+                        2
+                    )
+
+                }
+
+            )
+
+
+
+    files.sort(
+        key=lambda x:x["name"]
+    )
+
+
+
+    if not files:
+
+        return "empty"
+
+
+
+    raw = json.dumps(
+        files,
+        sort_keys=True
+    )
+
+
+
+    return hashlib.md5(
+        raw.encode()
+    ).hexdigest()
+
+
+
+
+
+def needs_reingestion(
+        client,
+        documents_path: str
+):
+
+
+    cache_file = (
+
+        Path(config.CHROMA_PATH)
+
+        /
+
+        "ingestion_cache.json"
+
+    )
+
+
+
+    current_fp = get_documents_fingerprint(
+        documents_path
+    )
+
+
+    old_fp = ""
+
+
+
+    if cache_file.exists():
+
+
+        try:
+
+            with open(
+                cache_file,
+                "r"
+            ) as f:
+
+
+                data = json.load(f)
+
+
+                old_fp = data.get(
+                    "fingerprint",
+                    ""
+                )
+
+
+        except Exception:
+
+            old_fp = ""
+
+
+
+
+    if current_fp == old_fp:
+
+
+        print(
+
+            f"[cache] Fingerprint match "
+            f"{current_fp[:8]} "
+            "- skipping ingestion"
+
+        )
+
+
+        return False
+
+
+
+
+    print(
+
+        f"[cache] Fingerprint changed "
+        f"{old_fp[:8] or 'none'} "
+        f"-> {current_fp[:8]}"
+
+    )
+
+
+
+    cache_file.parent.mkdir(
+        exist_ok=True
+    )
+
+
+
+    with open(
+        cache_file,
+        "w"
+    ) as f:
+
+
+        json.dump(
+
+            {
+                "fingerprint": current_fp
+            },
+
+            f
+
+        )
+
+
+
+    return True
+
+
+
+
+
+# ---------------------------------------------------------
+# Ingestion
+# ---------------------------------------------------------
 
 def ingest_chunks(
-    chunks: list[dict],
-    model: SentenceTransformer,
-    client: chromadb.PersistentClient,
-) -> int:
-    """
-    Embed all chunks and store them in ChromaDB.
 
-    This is the ingestion step — called once when documents are loaded,
-    or when new documents are added.
+        chunks:list[dict],
 
-    Args:
-        chunks: List of chunk dicts from chunker.load_and_chunk()
-                Each must have: text, source, chunk_id
-        model:  Loaded embedding model.
-        client: ChromaDB persistent client.
+        model:SentenceTransformer,
 
-    Returns:
-        Number of chunks successfully stored.
-    """
+        client
+
+):
+
+
     if not chunks:
-        print("[retriever] No chunks to ingest.")
+
+
+        print(
+            "[retriever] No chunks found"
+        )
+
+
         return 0
 
-    collection = get_or_create_collection(client)
 
-    # Check which chunk_ids are already stored — avoid re-embedding duplicates
-    existing = set(collection.get()["ids"])
-    new_chunks = [c for c in chunks if c["chunk_id"] not in existing]
+
+
+    collection = get_or_create_collection(
+        client
+    )
+
+
+
+    existing = set(
+
+        collection.get()["ids"]
+
+    )
+
+
+
+    new_chunks = [
+
+        c for c in chunks
+
+        if c["chunk_id"] not in existing
+
+    ]
+
+
 
     if not new_chunks:
-        print(f"[retriever] All {len(chunks)} chunks already in ChromaDB. Skipping.")
+
+
+        print(
+            "[retriever] No new chunks"
+        )
+
+
         return 0
 
-    print(f"[retriever] Ingesting {len(new_chunks)} new chunks...")
 
-    texts     = [c["text"]     for c in new_chunks]
-    ids       = [c["chunk_id"] for c in new_chunks]
-    metadatas = [{"source": c["source"], "chunk_id": c["chunk_id"]}
-                 for c in new_chunks]
 
-    from rag.embedder import embed_batch
-    vectors = embed_batch(model, texts)
+
+    texts = [
+
+        c["text"]
+
+        for c in new_chunks
+
+    ]
+
+
+
+    ids = [
+
+        c["chunk_id"]
+
+        for c in new_chunks
+
+    ]
+
+
+
+    # PDF page metadata support
+
+    metadata = [
+
+        {
+
+            "source": c["source"],
+
+            "chunk_id": c["chunk_id"],
+
+
+            **(
+
+                {
+                    "page": c["page"]
+                }
+
+                if "page" in c
+
+                else {}
+
+            )
+
+        }
+
+        for c in new_chunks
+
+    ]
+
+
+
+    vectors = embed_batch(
+
+        model,
+
+        texts
+
+    )
+
+
 
     collection.add(
-        ids        = ids,
-        documents  = texts,
-        embeddings = vectors,
-        metadatas  = metadatas,
+
+        ids=ids,
+
+        documents=texts,
+
+        embeddings=vectors,
+
+        metadatas=metadata
+
     )
 
-    print(f"[retriever] Stored {len(new_chunks)} chunks. "
-          f"Collection total: {collection.count()}")
-    return len(new_chunks)
 
+
+    print(
+
+        f"[retriever] Added {len(ids)} chunks"
+
+    )
+
+
+    return len(ids)
+
+
+
+
+
+
+# ---------------------------------------------------------
+# Retrieval
+# ---------------------------------------------------------
 
 def retrieve(
-    query: str,
-    model: SentenceTransformer,
-    client: chromadb.PersistentClient,
-    top_k: int   = config.RETRIEVAL_TOP_K,
-    top_n: int   = config.RERANK_TOP_N,
-) -> list[dict]:
-    """
-    Find the most relevant chunks for a query using vector similarity,
-    then re-rank and return only the best top_n.
 
-    Pipeline:
-      1. Embed the query using the same model used at ingestion
-      2. Query ChromaDB for top_k nearest neighbors by cosine similarity
-      3. Re-rank: filter out low-confidence results (similarity < threshold)
-      4. Return top_n chunks with text, source, and similarity score
+        query:str,
 
-    Args:
-        query:  The user's question as a plain string.
-        model:  Loaded embedding model (same as used at ingestion).
-        client: ChromaDB persistent client.
-        top_k:  How many candidates to fetch from ChromaDB.
-        top_n:  How many to keep after re-ranking.
+        model,
 
-    Returns:
-        List of chunk dicts, best match first:
-        [{"text": "...", "source": "file.txt", "score": 0.87}, ...]
-    """
-    collection = get_or_create_collection(client)
+        client,
 
-    if collection.count() == 0:
-        print("[retriever] ChromaDB is empty — no documents ingested yet.")
-        return []
+        top_k=config.RETRIEVAL_TOP_K,
 
-    # Step 1: Embed the query
-    query_vector = embed_text(model, query)
+        top_n=config.RERANK_TOP_N
 
-    # Step 2: Fetch top_k candidates from ChromaDB
-    results = collection.query(
-        query_embeddings=[query_vector],
-        n_results=min(top_k, collection.count()),
-        include=["documents", "metadatas", "distances"],
+):
+
+
+    collection = get_or_create_collection(
+        client
     )
 
-    # Step 3: Parse and re-rank
-    # ChromaDB returns cosine DISTANCE (0=identical, 2=opposite)
-    # Convert to similarity: similarity = 1 - distance
-    candidates = []
-    documents  = results["documents"][0]
-    metadatas  = results["metadatas"][0]
-    distances  = results["distances"][0]
 
-    for doc, meta, dist in zip(documents, metadatas, distances):
-        similarity = 1.0 - dist
 
-        candidates.append({
-            "text":   doc,
-            "source": meta.get("source", "unknown"),
-            "score":  round(similarity, 4),
-        })
+    if collection.count() == 0:
 
-    # Sort by similarity descending (ChromaDB usually returns sorted,
-    # but we re-sort to be safe after any future filtering steps)
-    candidates.sort(key=lambda x: x["score"], reverse=True)
 
-    # Step 4: Apply minimum similarity threshold and take top_n
-    SIMILARITY_THRESHOLD = 0.3   # Discard chunks with < 30% relevance
-    ranked = [c for c in candidates if c["score"] >= SIMILARITY_THRESHOLD]
-    final  = ranked[:top_n]
+        print(
+            "[retriever] Empty database"
+        )
 
-    print(f"[retriever] Query: '{query[:50]}...' | "
-          f"Fetched: {len(candidates)} | "
-          f"After re-rank: {len(final)}")
 
-    for i, chunk in enumerate(final):
-        print(f"  [{i+1}] score={chunk['score']:.3f} | source={chunk['source']} | "
-              f"preview='{chunk['text'][:60]}...'")
+        return []
 
-    return final
+
+
+
+    query_vector = embed_text(
+
+        model,
+
+        query
+
+    )
+
+
+
+    results = collection.query(
+
+        query_embeddings=[
+
+            query_vector
+
+        ],
+
+
+        n_results=min(
+
+            top_k,
+
+            collection.count()
+
+        ),
+
+
+        include=[
+
+            "documents",
+
+            "metadatas",
+
+            "distances"
+
+        ]
+
+    )
+
+
+
+    documents = results["documents"][0]
+
+    metadata = results["metadatas"][0]
+
+    distances = results["distances"][0]
+
+
+
+    chunks = []
+
+
+
+    for doc,meta,distance in zip(
+
+        documents,
+
+        metadata,
+
+        distances
+
+    ):
+
+
+
+        score = round(
+
+            1 - distance,
+
+            4
+
+        )
+
+
+
+        chunks.append(
+
+            {
+
+                "text": doc,
+
+
+                "source": meta.get(
+
+                    "source",
+
+                    "unknown"
+
+                ),
+
+
+                "page": meta.get(
+
+                    "page",
+
+                    None
+
+                ),
+
+
+                "score": score
+
+            }
+
+        )
+
+
+
+
+    chunks.sort(
+
+        key=lambda x:x["score"],
+
+        reverse=True
+
+    )
+
+
+
+    final_chunks = [
+
+        c for c in chunks
+
+        if c["score"] >= 0.15
+
+    ][:top_n]
+
+
+
+    print(
+
+        f"[retriever] Returned "
+        f"{len(final_chunks)} chunks"
+
+    )
+
+
+
+    return final_chunks
+
+# ---------------------------------------------------------
+# Upload Support (Phase 4)
+# ---------------------------------------------------------
+
+def save_uploaded_file(uploaded_file, documents_path: Path):
+
+    documents_path = Path(documents_path)
+
+    documents_path.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+
+    destination = documents_path / uploaded_file.name
+
+
+    if destination.exists():
+
+        raise ValueError(
+            f"{uploaded_file.name} already exists."
+        )
+
+
+    with open(destination, "wb") as f:
+
+        f.write(
+            uploaded_file.getbuffer()
+        )
+
+
+    print(
+        f"[upload] Saved {destination.name}"
+    )
+
+
+    return destination
+
+
+
+
+
+def ingest_uploaded_file(
+        uploaded_file,
+        model,
+        client,
+        documents_path
+):
+
+    from rag.chunker import (
+        load_text_document,
+        load_pdf,
+        clean_text,
+        split_text
+    )
+
+
+    saved_file = save_uploaded_file(
+        uploaded_file,
+        documents_path
+    )
+
+
+    ext = saved_file.suffix.lower()
+
+
+
+    if ext == ".pdf":
+
+        raw_docs = load_pdf(
+            saved_file
+        )
+
+
+    else:
+
+        doc = load_text_document(
+            saved_file
+        )
+
+        raw_docs = [doc] if doc else []
+
+
+
+
+    if not raw_docs:
+
+        print(
+            "[upload] No content extracted"
+        )
+
+        return 0
+
+
+
+
+    chunks = []
+
+
+
+    for doc in raw_docs:
+
+
+        text = clean_text(
+            doc["text"]
+        )
+
+
+        pieces = split_text(
+            text
+        )
+
+
+        for idx,piece in enumerate(pieces):
+
+
+            if ext == ".pdf":
+
+
+                page = doc.get(
+                    "page",
+                    1
+                )
+
+
+                chunk_id = (
+                    f"{doc['source']}_"
+                    f"p{page}_"
+                    f"{idx}"
+                )
+
+
+                chunks.append(
+
+                    {
+                        "text":piece,
+
+                        "source":doc["source"],
+
+                        "chunk_id":chunk_id,
+
+                        "page":page
+                    }
+
+                )
+
+
+            else:
+
+
+                chunks.append(
+
+                    {
+                        "text":piece,
+
+                        "source":doc["source"],
+
+                        "chunk_id":
+                        f"{doc['source']}_{idx}"
+                    }
+
+                )
+
+
+
+
+    count = ingest_chunks(
+        chunks,
+        model,
+        client
+    )
+
+
+
+    print(
+        f"[upload] Added {count} chunks"
+    )
+
+
+    return count

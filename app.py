@@ -6,19 +6,25 @@ import database
 
 from rag.chunker import load_and_chunk
 from rag.embedder import load_embedder
+
 from rag.retriever import (
     get_chroma_client,
     get_or_create_collection,
     ingest_chunks,
     retrieve,
+    needs_reingestion,
 )
+
 from rag.prompt_builder import build_prompt
 from rag.query_expander import expand_query
 
 from llm.ollama_llm import OllamaLLM
 
 
-# ---------------- PAGE CONFIG ----------------
+
+# -------------------------------------------------
+# PAGE CONFIG
+# -------------------------------------------------
 
 st.set_page_config(
     page_title="Document Intelligence Chatbot",
@@ -27,24 +33,40 @@ st.set_page_config(
 )
 
 
-# ---------------- LOAD RESOURCES ----------------
+
+# -------------------------------------------------
+# LOAD RESOURCES
+# -------------------------------------------------
 
 @st.cache_resource
 def load_resources():
 
+
     database.init_db()
+
+
+    print("[app] Loading embedding model")
 
     model = load_embedder()
 
+
+
+    print("[app] Connecting ChromaDB")
+
     client = get_chroma_client()
 
+
+
+    print("[app] Checking Ollama")
+
     llm = OllamaLLM()
+
 
 
     if not llm.health_check():
 
         st.warning(
-            f"Ollama not connected.\n\n"
+            f"Ollama not running.\n\n"
             f"Run:\n"
             f"ollama serve\n\n"
             f"Then:\n"
@@ -52,28 +74,67 @@ def load_resources():
         )
 
 
-    chunks = load_and_chunk()
+
+    # -------------------------
+    # Smart ingestion
+    # -------------------------
+
+    if needs_reingestion(
+        client,
+        str(config.DOCUMENTS_DIR)
+    ):
 
 
-    if chunks:
-
-        ingest_chunks(
-            chunks,
-            model,
-            client
+        print(
+            "[app] Documents changed. Re-ingesting..."
         )
+
+
+        chunks = load_and_chunk()
+
+
+        if chunks:
+
+
+            ingest_chunks(
+                chunks,
+                model,
+                client
+            )
+
+
+        else:
+
+
+            print(
+                "[app] No documents found"
+            )
+
+
+    else:
+
+
+        print(
+            "[app] Using existing vector database"
+        )
+
 
 
     return model, client, llm
 
 
 
-# ---------------- SESSION ----------------
 
+
+# -------------------------------------------------
+# SESSION STATE
+# -------------------------------------------------
 
 def init_session_state():
 
+
     defaults = {
+
 
         "session_id": None,
 
@@ -83,10 +144,13 @@ def init_session_state():
 
         "last_chunks": []
 
+
     }
 
 
+
     for key,value in defaults.items():
+
 
         if key not in st.session_state:
 
@@ -95,14 +159,19 @@ def init_session_state():
 
 
 
+
 def start_new_session():
+
 
     sid = str(uuid.uuid4())
 
 
     database.create_session(
+
         sid,
+
         title="New chat"
+
     )
 
 
@@ -117,101 +186,154 @@ def start_new_session():
 
 
 
+
 def load_session(sid):
+
 
     st.session_state.session_id = sid
 
 
     history = database.get_history(
+
         sid,
+
         limit=100
+
     )
 
 
     st.session_state.messages = [
 
         {
-            "role":m["role"],
-            "content":m["content"]
+
+            "role":msg["role"],
+
+            "content":msg["content"]
+
         }
 
-        for m in history
+        for msg in history
 
     ]
 
 
 
-# ---------------- RAG PIPELINE ----------------
 
+
+# -------------------------------------------------
+# RAG PIPELINE
+# -------------------------------------------------
 
 def process_query_stream(
+
         query,
+
         model,
+
         client,
+
         llm
+
 ):
 
 
     sid = st.session_state.session_id
 
 
+
     history = database.get_history(
+
         sid
+
     )
 
 
-    # query expansion
+
+    # Query expansion
 
     try:
 
+
         expanded_query = expand_query(
+
             query,
+
             history
+
         )
 
+
     except Exception:
+
 
         expanded_query = query
 
 
 
+
+    # Retrieve
+
     chunks = retrieve(
+
         expanded_query,
+
         model,
+
         client
+
     )
+
 
 
 
     prompt = build_prompt(
+
         chunks,
+
         history,
+
         query
+
     )
 
 
 
-    answer = []
+
+    tokens = []
+
 
 
     for token in llm.stream(prompt):
 
-        answer.append(token)
+
+        tokens.append(token)
+
 
         yield token
 
 
 
-    final_answer = "".join(answer)
+
+    answer = "".join(tokens)
 
 
+
+    # Save user message
 
     database.save_message(
+
         sid,
+
         "user",
+
         query
+
     )
 
+
+
+
+    # Save assistant message
 
     database.save_message(
 
@@ -219,37 +341,51 @@ def process_query_stream(
 
         "assistant",
 
-        final_answer,
+        answer,
 
         sources=[
 
+
             {
+
                 "source":c["source"],
-                "score":c["score"]
+
+                "score":c["score"],
+
+                "page":c.get("page")
 
             }
 
+
             for c in chunks
+
 
         ]
 
     )
 
 
+
     st.session_state.last_chunks = chunks
 
 
 
-    # update title
+
+
+    # Auto title
 
     sessions = database.list_sessions()
+
 
 
     current = next(
 
         (
+
             s for s in sessions
+
             if s["session_id"] == sid
+
         ),
 
         None
@@ -257,7 +393,9 @@ def process_query_stream(
     )
 
 
-    if current and current["title"]=="New chat":
+
+    if current and current["title"] == "New chat":
+
 
         database.update_session_title(
 
@@ -273,23 +411,34 @@ def process_query_stream(
 
 
 
-# ---------------- SIDEBAR ----------------
 
 
-def render_sidebar(llm,client):
+
+# -------------------------------------------------
+# SIDEBAR
+# -------------------------------------------------
+
+def render_sidebar(llm, client):
 
 
     with st.sidebar:
 
 
-        st.title("🔍 RAG Chat")
+
+        st.title(
+            "🔍 RAG Chat"
+        )
 
 
 
         if st.button(
-            "New Chat",
+
+            "＋ New Chat",
+
             use_container_width=True
+
         ):
+
 
             start_new_session()
 
@@ -297,21 +446,30 @@ def render_sidebar(llm,client):
 
 
 
+
         st.divider()
+
 
 
 
         if llm.health_check():
 
+
             st.success(
+
                 f"Ollama : {config.OLLAMA_MODEL}"
+
             )
 
+
         else:
+
 
             st.error(
                 "Ollama Offline"
             )
+
+
 
 
 
@@ -324,17 +482,24 @@ def render_sidebar(llm,client):
         )
 
 
+
         sessions = database.list_sessions()
+
 
 
         for s in sessions:
 
 
             active = (
+
                 s["session_id"]
+
                 ==
+
                 st.session_state.session_id
+
             )
+
 
 
             label = (
@@ -349,16 +514,27 @@ def render_sidebar(llm,client):
 
 
 
+
             if st.button(
+
                 label,
-                key=s["session_id"]
+
+                key=s["session_id"],
+
+                use_container_width=True
+
             ):
 
+
                 load_session(
+
                     s["session_id"]
+
                 )
 
+
                 st.rerun()
+
 
 
 
@@ -367,104 +543,211 @@ def render_sidebar(llm,client):
 
 
         with st.expander(
-            "Knowledge Base"
+            "📚 Knowledge Base"
         ):
 
 
-            col = get_or_create_collection(
+
+            collection = get_or_create_collection(
+
                 client
+
             )
+
+
+
+            total_chunks = collection.count()
 
 
             st.metric(
-                "Chunks",
-                col.count()
+                "Indexed Chunks",
+                total_chunks
             )
+
+
+            st.caption(
+                str(config.DOCUMENTS_DIR)
+            )
+
+
+            if total_chunks > 0:
+
+                all_metadata = collection.get()["metadatas"]
+
+
+                sources = sorted(
+                    {
+                        m["source"]
+                        for m in all_metadata
+                        if m and "source" in m
+                    }
+                )
+
+
+                st.caption(
+                    f"{len(sources)} file(s):"
+                )
+
+
+                for src in sources:
+
+                    st.caption(
+                        f"• {src}"
+                    )
+
+            else:
+
+                st.caption(
+                    "No documents indexed yet."
+                )
+
+
 
 
 
         with st.expander(
-            "Retrieval Debug"
+
+            "📊 Retrieval Debug"
+
         ):
+
 
 
             chunks = st.session_state.last_chunks
 
 
+
             if chunks:
+
+
 
                 for c in chunks:
 
+
                     score = max(
+
                         0,
+
                         min(
+
                             c["score"],
+
                             1
+
                         )
+
                     )
 
 
                     st.progress(
+
                         score,
-                        text=f"{c['source']} {c['score']:.2f}"
+
+                        text=(
+
+                            f"{c['source']} "
+
+                            f"{c['score']:.2f}"
+
+                        )
+
                     )
+
 
 
             else:
 
+
                 st.caption(
-                    "No retrieval yet"
+
+                    "Ask something to see retrieval"
+
                 )
 
 
 
-# ---------------- CHAT ----------------
 
 
-def render_chat(model,client,llm):
+
+
+# -------------------------------------------------
+# CHAT UI
+# -------------------------------------------------
+
+def render_chat(
+
+        model,
+
+        client,
+
+        llm
+
+):
 
 
     st.title(
+
         "Document Intelligence Chatbot"
+
     )
+
 
 
     if not st.session_state.session_id:
 
 
         st.info(
+
             "Click New Chat"
+
         )
 
         return
 
 
 
+
+
     for msg in st.session_state.messages:
 
+
         with st.chat_message(
+
             msg["role"]
+
         ):
 
+
             st.write(
+
                 msg["content"]
+
             )
 
 
 
+
+
     query = st.chat_input(
+
         "Ask about documents..."
+
     )
+
 
 
     if query:
 
 
+
         st.session_state.messages.append(
 
             {
+
                 "role":"user",
+
                 "content":query
+
             }
 
         )
@@ -473,7 +756,10 @@ def render_chat(model,client,llm):
 
         with st.chat_message("user"):
 
+
             st.write(query)
+
+
 
 
 
@@ -488,13 +774,79 @@ def render_chat(model,client,llm):
                     process_query_stream(
 
                         query,
+
                         model,
+
                         client,
+
                         llm
 
                     )
 
                 )
+
+
+
+                chunks = st.session_state.last_chunks
+
+
+
+
+                if chunks:
+
+
+                    with st.expander(
+
+                        f"Sources ({len(chunks)})"
+
+                    ):
+
+
+                        for c in chunks:
+
+
+
+                            page = ""
+
+
+                            if c.get("page"):
+
+
+                                page = (
+
+                                    f" · page {c['page']}"
+
+                                )
+
+
+
+                            st.markdown(
+
+                                f"""
+
+                                **{c['source']}**
+
+                                {page}
+
+                                relevance:
+
+                                `{c['score']:.2f}`
+
+                                """
+
+                            )
+
+
+
+                            st.caption(
+
+                                c["text"][:200]
+
+                                +
+
+                                "..."
+
+                            )
 
 
 
@@ -508,19 +860,69 @@ def render_chat(model,client,llm):
 
 
 
+
         st.session_state.messages.append(
 
             {
+
                 "role":"assistant",
+
                 "content":answer
+
             }
 
         )
 
+def render_upload_widget(model, client) -> None:
+    """
+    File uploader in the sidebar — saves and immediately indexes
+    new documents without requiring an app restart.
+    """
+    from rag.retriever import ingest_uploaded_file
+
+    with st.sidebar.expander("📄 Upload document", expanded=False):
+        uploaded_file = st.file_uploader(
+            "Add to knowledge base",
+            type=["txt", "md", "py", "csv", "html", "pdf"],
+            label_visibility="collapsed",
+            key="doc_uploader",
+        )
+
+        if uploaded_file is None:
+            st.caption("Supported: txt, md, py, csv, html, pdf")
+            return
+
+        # Avoid re-processing the same upload on every Streamlit rerun —
+        # track the last processed filename in session_state
+        if st.session_state.get("last_uploaded") == uploaded_file.name:
+            return
+
+        with st.spinner(f"Indexing {uploaded_file.name}..."):
+            try:
+                count = ingest_uploaded_file(
+                    uploaded_file, model, client, config.DOCUMENTS_DIR
+                )
+                st.session_state.last_uploaded = uploaded_file.name
+
+                if count > 0:
+                    st.success(f"Indexed {count} chunks from {uploaded_file.name}")
+                else:
+                    st.warning(f"No extractable text found in {uploaded_file.name}")
+
+            except ValueError as e:
+                st.error(str(e))
 
 
-# ---------------- MAIN ----------------
 
+
+
+# -------------------------------------------------
+# MAIN
+# -------------------------------------------------
+
+# -------------------------------------------------
+# MAIN
+# -------------------------------------------------
 
 def main():
 
@@ -528,7 +930,8 @@ def main():
     init_session_state()
 
 
-    model,client,llm = load_resources()
+
+    model, client, llm = load_resources()
 
 
 
@@ -538,13 +941,18 @@ def main():
     )
 
 
+    # Upload widget
+    render_upload_widget(
+        model,
+        client
+    )
+
+
     render_chat(
         model,
         client,
         llm
     )
-
-
 
 if __name__=="__main__":
 
