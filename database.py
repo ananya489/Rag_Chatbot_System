@@ -115,3 +115,9 @@ def get_history(session_id: str, limit: int | None = None) -> list[dict]:
             (session_id, n),
         ).fetchall()
     return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+
+def delete_session(session_id: str) -> None:
+    """Delete a session and all its messages (cascade)."""
+    with get_connection() as conn:
+        conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+        conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
