@@ -1,3 +1,8 @@
+![Python](https://img.shields.io/badge/python-3.11+-blue)
+
+![License](https://img.shields.io/badge/license-MIT-green)
+
+![Streamlit](https://img.shields.io/badge/streamlit-1.35-red)
 # RAG Chat System
 
 > A production-grade, locally-hosted Retrieval-Augmented Generation (RAG) chat system built with Streamlit, ChromaDB, SQLite, and Ollama. Ask questions about your own documents and get accurate, cited answers — with full conversation memory across sessions.
