@@ -36,3 +36,41 @@ LLM_MAX_TOKENS  = int(os.getenv("LLM_MAX_TOKENS", "1024"))
 # ── Ensure required directories exist ─────────────────────────────────────────
 DOCUMENTS_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# ── Multi-domain knowledge base ───────────────────────────────────────────────
+
+# Available domains — each maps to its own ChromaDB collection.
+# Add or remove domains here without touching any other file.
+DOMAINS: list[str] = [
+    "General",
+    "Customer Support",
+    "Finance",
+    "Legal",
+    "HR",
+    "Education",
+]
+
+# The domain selected when the app first loads.
+DEFAULT_DOMAIN: str = "General"
+
+# Internal prefix for ChromaDB collection names.
+# "General" → "domain_general", "Customer Support" → "domain_customer_support"
+COLLECTION_PREFIX: str = "domain"
+
+
+def domain_to_collection_name(domain: str) -> str:
+    """
+    Convert a human-readable domain name to a valid ChromaDB collection name.
+
+    ChromaDB collection names must be lowercase alphanumeric with underscores.
+    Spaces and special characters are replaced with underscores.
+
+    Examples:
+        "General"          → "domain_general"
+        "Customer Support" → "domain_customer_support"
+        "HR"               → "domain_hr"
+    """
+    sanitised = domain.lower().strip().replace(" ", "_")
+    # Remove any character that isn't alphanumeric or underscore
+    sanitised = "".join(c if c.isalnum() or c == "_" else "_" for c in sanitised)
+    return f"{COLLECTION_PREFIX}_{sanitised}"
