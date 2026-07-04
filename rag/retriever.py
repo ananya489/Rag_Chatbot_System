@@ -8,7 +8,7 @@ from sentence_transformers import SentenceTransformer
 
 from rag.embedder import embed_text, embed_batch
 import config
-
+from rag.bm25_index import BM25Index
 
 # ── Client ────────────────────────────────────────────────────────────────────
 
@@ -97,37 +97,26 @@ def needs_reingestion(
     client: chromadb.PersistentClient,
     documents_path: str,
     domain: str = config.DEFAULT_DOMAIN,
-) -> bool:
+):
     """
     Check whether documents changed since last ingestion.
-    Updates only the fingerprint metadata.
+    Only compares fingerprints.
     """
 
     collection = get_or_create_collection(client, domain)
 
     current_fp = get_documents_fingerprint(documents_path)
 
-    metadata = collection.metadata or {}
-
-    stored_fp = metadata.get("documents_fingerprint", "")
+    stored_fp = collection.metadata.get(
+        "documents_fingerprint",
+        ""
+    )
 
     if current_fp == stored_fp:
         print(f"[cache] Domain '{domain}' fingerprint match — skipping ingestion.")
         return False
 
     print(f"[cache] Domain '{domain}' fingerprint changed — re-ingesting.")
-
-    # Remove reserved Chroma metadata
-    metadata = {
-        k: v
-        for k, v in metadata.items()
-        if k != "hnsw:space"
-    }
-
-    metadata["documents_fingerprint"] = current_fp
-
-    collection.modify(metadata=metadata)
-
     return True
 
 # ── Ingestion ─────────────────────────────────────────────────────────────────
@@ -183,6 +172,17 @@ def ingest_chunks(
     collection.add(
         ids=ids, documents=texts, embeddings=vectors, metadatas=metadatas
     )
+    metadata = dict(collection.metadata or {})
+    metadata.pop("hnsw:space", None)
+    metadata["documents_fingerprint"] = get_documents_fingerprint(
+    str(config.DOCUMENTS_DIR)
+)
+
+    try:
+        collection.modify(metadata=metadata)
+    except Exception:
+        pass
+
     print(
         f"[retriever] Stored {len(new_chunks)} chunks in '{domain}'. "
         f"Collection total: {collection.count()}"
@@ -242,6 +242,7 @@ def retrieve(
         results["distances"][0],
     ):
         candidates.append({
+            "chunk_id": meta.get("chunk_id"), 
             "text":   doc,
             "source": meta.get("source", "unknown"),
             "domain": meta.get("domain", domain),
@@ -379,3 +380,243 @@ def ingest_uploaded_file(
     needs_reingestion(client, str(documents_path), domain)
     return count
 
+# ── Reciprocal Rank Fusion ────────────────────────────────────────────────────
+
+def reciprocal_rank_fusion(
+    semantic_results: list[dict],
+    bm25_results:     list[dict],
+    k:                int   = config.RRF_K,
+    semantic_weight:  float = config.SEMANTIC_WEIGHT,
+    bm25_weight:      float = config.BM25_WEIGHT,
+) -> list[dict]:
+    """
+    Merge semantic and BM25 result lists using Reciprocal Rank Fusion.
+
+    RRF is scale-independent — it works purely on rank position, not
+    raw scores. This solves the problem of combining cosine similarities
+    (0.0–1.0) with BM25 scores (0.0–∞) without arbitrary normalization.
+
+    Formula: rrf_score = semantic_weight / (k + rank_s)
+                       + bm25_weight    / (k + rank_b)
+
+    Where rank_s and rank_b are 1-indexed positions in their respective lists.
+    A chunk absent from one list is simply not added from that list —
+    it may still appear via the other list.
+
+    Args:
+        semantic_results: Chunks from retrieve(), ordered by cosine similarity.
+        bm25_results:     Chunks from BM25Index.search(), ordered by BM25 score.
+        k:                RRF smoothing constant (default 60, per literature).
+        semantic_weight:  Contribution weight of semantic rankings.
+        bm25_weight:      Contribution weight of BM25 rankings.
+
+    Returns:
+        Merged list of chunk dicts sorted by combined RRF score descending.
+        Each chunk has a "score" key containing the final fused score,
+        and a "retrieval_method" key for debug visibility.
+    """
+    # Map chunk_id → accumulated RRF score
+    fused_scores: dict[str, float] = {}
+
+    # Map chunk_id → the chunk dict (for reconstruction after scoring)
+    chunk_map: dict[str, dict] = {}
+
+    # Score each chunk from semantic results by its rank position
+    for rank, chunk in enumerate(semantic_results, start=1):
+        cid = chunk["chunk_id"]
+        fused_scores[cid]   = fused_scores.get(cid, 0.0) + semantic_weight / (k + rank)
+        chunk_map[cid]      = {**chunk, "retrieval_method": "semantic"}
+
+    # Add BM25 rank contributions — accumulates with semantic if already present
+    for rank, chunk in enumerate(bm25_results, start=1):
+        cid = chunk["chunk_id"]
+        fused_scores[cid] = fused_scores.get(cid, 0.0) + bm25_weight / (k + rank)
+
+        if cid not in chunk_map:
+            # BM25-only result — build a compatible chunk dict
+            chunk_map[cid] = {
+                "text":             chunk["text"],
+                "source":           chunk["source"],
+                "chunk_id":         cid,
+                "retrieval_method": "bm25",
+                **( {"page": chunk["page"]} if chunk.get("page") else {} ),
+            }
+        else:
+            # Appeared in both lists — mark as hybrid
+            chunk_map[cid]["retrieval_method"] = "hybrid"
+
+    # Attach the final fused score and sort
+    results = []
+    for cid, rrf_score in fused_scores.items():
+        chunk = {**chunk_map[cid], "score": round(rrf_score, 6)}
+        results.append(chunk)
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results
+
+
+# ── Hybrid retrieval ──────────────────────────────────────────────────────────
+
+def hybrid_retrieve(
+    query:      str,
+    model,
+    client,
+    bm25_index: BM25Index,
+    domain:     str = config.DEFAULT_DOMAIN,
+    top_k:      int = config.RETRIEVAL_TOP_K,
+    top_n:      int = config.RERANK_TOP_N,
+) -> list[dict]:
+    """
+    Retrieve relevant chunks using hybrid semantic + BM25 search.
+
+    Pipeline:
+        1. Run semantic (vector) search via ChromaDB
+        2. Run BM25 (keyword) search via in-memory BM25Index
+        3. Fuse both result lists using Reciprocal Rank Fusion
+        4. Return the top_n fused results
+
+    The BM25 index is built from all chunks currently in the given
+    domain's ChromaDB collection. This means it always stays in sync
+    with ChromaDB — no separate index management needed.
+
+    Args:
+        query:      User's question string.
+        model:      Loaded SentenceTransformer.
+        client:     ChromaDB persistent client.
+        bm25_index: BM25Index instance for this domain. May be empty
+                    (not yet built) — falls back to semantic-only.
+        domain:     Domain to search.
+        top_k:      Candidates from each retriever before fusion.
+        top_n:      Final results returned after fusion.
+
+    Returns:
+        List of chunk dicts sorted by fused score, best first.
+        Each chunk includes a "retrieval_method" field:
+            "semantic" — found by vector search only
+            "bm25"     — found by keyword search only
+            "hybrid"   — found by both (highest quality signal)
+    """
+    # Step 1: Semantic retrieval (existing ChromaDB search)
+    semantic_chunks = retrieve(query, model, client, domain=domain, top_k=top_k)
+
+    # Step 2: BM25 retrieval (keyword search)
+    if bm25_index.is_empty():
+        print(f"[hybrid] BM25 index empty for '{domain}' — using semantic only.")
+        for chunk in semantic_chunks:
+            chunk["retrieval_method"] = "semantic"
+        return semantic_chunks[:top_n]
+
+    bm25_chunks = bm25_index.search(query, top_k=top_k)
+
+    # Step 3: Fuse results
+    fused = reciprocal_rank_fusion(semantic_chunks, bm25_chunks)
+
+    print(
+        f"[hybrid] Domain '{domain}' | "
+        f"semantic={len(semantic_chunks)} | "
+        f"bm25={len(bm25_chunks)} | "
+        f"fused={len(fused)} | "
+        f"returning={min(top_n, len(fused))}"
+    )
+
+    # Log retrieval methods for debug visibility
+    for chunk in fused[:top_n]:
+        print(
+            f"  [{chunk['retrieval_method']:8}] "
+            f"score={chunk['score']:.5f} | "
+            f"source={chunk['source']} | "
+            f"preview={chunk['text'][:50]}..."
+        )
+
+    return fused[:top_n]
+
+
+def hybrid_retrieve_all_domains(
+    query:             str,
+    model,
+    client,
+    domain_bm25_map:   dict[str, BM25Index],
+    top_n:             int = config.RERANK_TOP_N,
+) -> list[dict]:
+    """
+    Hybrid search across all existing domain collections.
+
+    Each domain is searched independently using its own BM25 index.
+    Results from all domains are merged and re-sorted by fused score.
+
+    Args:
+        query:           User's question.
+        model:           Loaded SentenceTransformer.
+        client:          ChromaDB persistent client.
+        domain_bm25_map: Dict mapping domain name → BM25Index.
+                         Keys are domain names from config.DOMAINS.
+        top_n:           Chunks returned per domain before cross-domain merge.
+
+    Returns:
+        Merged list of hybrid chunk dicts from all domains, sorted by score.
+    """
+    all_chunks: list[dict] = []
+    domains = list_all_collections(client)
+
+    if not domains:
+        print("[hybrid] No domain collections found.")
+        return []
+
+    for domain in domains:
+        bm25_index = domain_bm25_map.get(domain, BM25Index())
+        chunks     = hybrid_retrieve(
+            query, model, client, bm25_index, domain=domain, top_n=top_n
+        )
+        all_chunks.extend(chunks)
+
+    merged = sorted(all_chunks, key=lambda x: x["score"], reverse=True)
+    print(f"[hybrid] All-domain: {len(merged)} chunks from {len(domains)} domains")
+    return merged[:top_n * 2]
+
+
+# ── BM25 index builder ────────────────────────────────────────────────────────
+
+def build_bm25_index_for_domain(
+    client: chromadb.PersistentClient,
+    domain: str = config.DEFAULT_DOMAIN,
+) -> BM25Index:
+    """
+    Build a BM25 index from all chunks currently stored in a domain's
+    ChromaDB collection.
+
+    This is called once per domain at startup and after any new
+    document is ingested. The BM25 index lives in memory — it is
+    rebuilt cheaply from ChromaDB's stored documents rather than
+    maintaining a separate persistence layer.
+
+    Args:
+        client: ChromaDB persistent client.
+        domain: Domain whose collection to index.
+
+    Returns:
+        A built BM25Index ready for search(). Returns an empty
+        BM25Index if the collection has no documents.
+    """
+    collection = get_or_create_collection(client, domain)
+
+    if collection.count() == 0:
+        print(f"[bm25] Domain '{domain}' is empty — returning empty index.")
+        return BM25Index()
+
+    # Fetch all stored documents and their metadata from ChromaDB
+    data      = collection.get(include=["documents", "metadatas"])
+    documents = data["documents"]
+    metadatas = data["metadatas"]
+    ids       = data["ids"]
+
+    chunks = [
+        {
+            "text":     doc,
+            "chunk_id": cid,
+            "source":   meta.get("source", "unknown"),
+            "page":     meta.get("page"),
+        }
+        for doc, meta, cid in zip(documents, metadatas, ids)
+    ]
+
+    return BM25Index().build(chunks)

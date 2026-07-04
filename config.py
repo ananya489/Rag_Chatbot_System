@@ -74,3 +74,18 @@ def domain_to_collection_name(domain: str) -> str:
     # Remove any character that isn't alphanumeric or underscore
     sanitised = "".join(c if c.isalnum() or c == "_" else "_" for c in sanitised)
     return f"{COLLECTION_PREFIX}_{sanitised}"
+
+# ── Hybrid retrieval ──────────────────────────────────────────────────────────
+
+# Weight given to semantic (vector) search score in RRF fusion.
+# Must sum to 1.0 with BM25_WEIGHT.
+SEMANTIC_WEIGHT: float = 0.6
+
+# Weight given to BM25 (keyword) search score in RRF fusion.
+# 0.4 gives keyword search meaningful influence without overriding semantics.
+BM25_WEIGHT: float = 0.4
+
+# Smoothing constant for Reciprocal Rank Fusion.
+# k=60 is the standard value from the original RRF paper (Cormack et al. 2009).
+# Higher k reduces the advantage of top-ranked results.
+RRF_K: int = 60
