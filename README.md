@@ -1,116 +1,198 @@
-# RAG Chatbot System — Document Intelligence Chatbot
+# RAG Chatbot System
 
-![Python](https://img.shields.io/badge/python-3.11+-blue?logo=python&logoColor=white)
-![Streamlit](https://img.shields.io/badge/streamlit-1.35-red?logo=streamlit&logoColor=white)
-![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
-![License](https://img.shields.io/badge/license-MIT-green)
+> A locally-hosted, privacy-first Retrieval-Augmented Generation chat system. Ask questions about your own documents and receive answers grounded strictly in retrieved evidence — with hybrid BM25 + semantic search, multi-domain knowledge bases, persistent conversation memory, and streaming responses.
 
-A Retrieval-Augmented Generation (RAG) chatbot that turns any collection of documents into a queryable knowledge base. Upload PDFs, markdown, or text files, ask questions in natural language, and get answers grounded strictly in your own content — with source citations, persistent chat history, and a live analytics dashboard.
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Technology Stack](#technology-stack)
+- [Folder Structure](#folder-structure)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Running the Project](#running-the-project)
+- [Hybrid Retrieval Pipeline](#hybrid-retrieval-pipeline)
+- [Conversation Memory](#conversation-memory)
+- [Multi-Domain Knowledge Base](#multi-domain-knowledge-base)
+- [Logging](#logging)
+- [Testing](#testing)
+- [Screenshots](#screenshots)
+- [Future Improvements](#future-improvements)
+- [Contributing](#contributing)
+- [License](#license)
+- [Author](#author)
 
 ---
 
 ## Overview
 
-Large language models are powerful but limited to what they were trained on — they cannot answer questions about your private documents, internal reports, or recent research, and they tend to hallucinate when they don't know something.
+Standard LLMs answer from training data alone — they hallucinate when asked about private documents, internal reports, or domain-specific knowledge they were never trained on.
 
-**RAG Chatbot System** solves this by combining semantic search with local LLM generation. Documents are split into chunks, converted into vector embeddings, and stored in ChromaDB. When a user asks a question, the most relevant chunks are retrieved and passed to the LLM as context — so every answer is grounded in real, retrievable evidence rather than the model's memory.
+**RAG Chatbot System** grounds every answer in your actual documents. Files are chunked, embedded into vectors, and stored in ChromaDB. When you ask a question, the system runs **hybrid BM25 + vector retrieval** — combining keyword precision with semantic understanding — and passes the most relevant chunks to a local Ollama LLM as context.
 
-The system runs entirely locally using Ollama for inference, meaning no API keys, no per-token costs, and no data ever leaving your machine.
+Everything runs locally. No API keys. No cloud. No data leaves your machine.
 
 ---
 
 ## Features
 
-- **Multi-format document ingestion** — PDF, TXT, MD, PY, CSV, and HTML files supported out of the box
-- **Automatic chunking and embedding** — documents are split, embedded, and indexed without manual configuration
-- **Semantic retrieval with re-ranking** — ChromaDB cosine similarity search filtered by relevance threshold
-- **Query expansion** — vague follow-up questions are resolved using conversation context before retrieval
-- **Strict grounding prompt engineering** — answers are generated only from retrieved context, reducing hallucination
-- **Source-aware responses** — every answer cites the document (and page number, for PDFs) it came from
-- **Persistent multi-session chat memory** — conversations survive app restarts via SQLite
-- **Full session management** — create, rename, and delete conversations from the UI
-- **In-app document upload** — add files directly through the Streamlit sidebar, indexed immediately
-- **Analytics dashboard** — tracks total queries, average response time, and most-referenced sources
-- **Conversation export** — download any chat as a Markdown file
-- **Streaming responses** — answers appear token by token in real time
-- **Containerized deployment** — Docker and Docker Compose configuration included
+**Document Ingestion**
+- Supports PDF, DOCX, TXT, MD, PY, CSV, and HTML
+- Recursive text splitting with configurable chunk size and overlap
+- Page-aware chunking for PDFs — page numbers preserved in metadata
+- In-app drag-and-drop upload via Streamlit sidebar
+- Fingerprint-based ingestion cache — skips re-embedding unchanged documents on restart
+
+**Retrieval**
+- Hybrid BM25 + ChromaDB vector search fused via Reciprocal Rank Fusion
+- Per-query BM25 scoring with IDF-weighted term frequency
+- Cosine similarity retrieval from ChromaDB
+- Re-ranking with configurable similarity threshold
+- Query expansion resolves vague follow-up questions before retrieval
+
+**Multi-Domain Knowledge Base**
+- Isolated ChromaDB collection per domain (General, HR, Finance, Legal, Education, Customer Support)
+- Search within one domain or across all domains simultaneously
+- Upload documents into specific domains from the UI
+
+**Conversation Memory**
+- Two-layer memory: LLM-generated summary of older turns + verbatim recent turns
+- Summarization triggers after a configurable turn threshold
+- Summaries cached in SQLite — regenerated only when stale
+- Context window stays bounded regardless of conversation length
+
+**Chat Management**
+- Persistent multi-session history via SQLite
+- Create, rename, and delete sessions from the sidebar
+- Session titles auto-generated from first user message
+- Export any conversation as a Markdown file
+
+**Generation**
+- Streaming responses token-by-token via `st.write_stream`
+- Strict grounding prompt — answers only from retrieved context
+- Source citations with filename, relevance score, page number, and retrieval method
+- Retrieval method icon per source: 🔀 hybrid · 🔤 BM25 · 🔍 semantic
+
+**Observability**
+- Analytics dashboard: total queries, average response time, top cited sources
+- Last-query debug panel: per-chunk retrieval scores as progress bars
+- Structured logging to terminal (INFO+) and `logs/rag_chat.log` (DEBUG+)
+
+**Deployment**
+- Docker + Docker Compose with separate Ollama and Streamlit containers
+- Pluggable LLM layer — swap providers by implementing one abstract interface
 
 ---
 
 ## Architecture
 
 ```
-                    User
-                     │
-                     ▼
-              Streamlit UI
-                     │
-                     ▼
-              RAG Pipeline
-                     │
-                     ▼
-          Query Expansion + Retriever
-                     │
-                     ▼
-                ChromaDB
-          (vector similarity search)
-                     │
-                     ▼
-             Prompt Builder
-     (context + chat history + question)
-                     │
-                     ▼
-              Ollama LLM
-              (qwen2.5:7b)
-                     │
-                     ▼
-                 Response
-          (streamed + source citations)
-```
+┌──────────────────────────────────────────────────────────────┐
+│                    INGESTION PIPELINE                         │
+│                                                               │
+│  Documents → Chunker → Metadata tag → Embedder → ChromaDB    │
+│  (fingerprint cache skips unchanged files on restart)         │
+└──────────────────────────────────────────────────────────────┘
 
-Chat history and session metadata are persisted independently in SQLite, read and written on every turn so conversations remain available across restarts.
+┌──────────────────────────────────────────────────────────────┐
+│                     QUERY PIPELINE                            │
+│                                                               │
+│  User question                                                │
+│       │                                                       │
+│       ▼                                                       │
+│  ConversationMemory                                           │
+│  (summary of old turns + recent turns verbatim)               │
+│       │                                                       │
+│       ▼                                                       │
+│  Query Expander                                               │
+│  (resolves vague follow-ups using recent history)             │
+│       │                          │                            │
+│       ▼                          ▼                            │
+│  ChromaDB (semantic)        BM25Index (keyword)               │
+│       │                          │                            │
+│       └──────────────┬───────────┘                           │
+│                       ▼                                       │
+│             Reciprocal Rank Fusion                            │
+│             (scale-independent merge)                         │
+│                       │                                       │
+│                       ▼                                       │
+│             Prompt Builder                                    │
+│    [system · context · summary · recent · question]           │
+│                       │                                       │
+│                       ▼                                       │
+│             Ollama LLM (stream)                               │
+│                       │                                       │
+│          ┌────────────┴────────────┐                         │
+│          ▼                         ▼                          │
+│     SQLite (persist)          Streamlit UI                    │
+│     Analytics log             (token-by-token render)         │
+└──────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## Tech Stack
+## Technology Stack
 
 | Layer | Technology |
 |---|---|
-| Backend | Python 3.11 |
-| Frontend | Streamlit |
-| LLM | Ollama — qwen2.5:7b |
-| Embeddings | Sentence Transformers (`all-MiniLM-L6-v2`) |
-| Vector Database | ChromaDB |
-| Persistent Storage | SQLite |
-| Deployment | Docker, Docker Compose |
+| UI | Streamlit 1.35 |
+| LLM | Ollama — qwen2.5:7b (local, no API key) |
+| Embeddings | sentence-transformers `all-MiniLM-L6-v2` (384-dim) |
+| Vector search | ChromaDB 0.5 — cosine similarity, HNSW index |
+| Keyword search | rank-bm25 — BM25 with IDF weighting |
+| Fusion | Reciprocal Rank Fusion (Cormack et al., 2009) |
+| Persistent storage | SQLite (sessions, messages, summaries, analytics) |
+| PDF ingestion | pypdf |
+| DOCX ingestion | python-docx |
+| Deployment | Docker + Docker Compose |
+| Language | Python 3.11 |
 
 ---
 
-## Project Structure
+## Folder Structure
 
 ```
 rag_chatbot_system/
 │
-├── app.py                   # Streamlit entry point — UI and orchestration
-├── config.py                # Centralized configuration and environment loading
-├── database.py               # SQLite session and chat history management
-├── analytics.py              # Query analytics and usage tracking
-├── requirements.txt
-├── Dockerfile
-├── docker-compose.yml
+├── app.py                    # Streamlit entry point — orchestrates all modules
+├── config.py                 # All settings, paths, model names, domain list
+├── database.py               # SQLite CRUD — sessions, messages, summaries
+├── analytics.py              # Query analytics — response time, top sources
+├── logger.py                 # Centralized logging — console + file handlers
 │
 ├── rag/
-│   ├── chunker.py            # Document loading and chunking (PDF + text)
-│   ├── embedder.py           # Sentence-transformer embedding generation
-│   ├── retriever.py          # ChromaDB indexing and similarity retrieval
-│   ├── prompt_builder.py     # Context-aware prompt construction
-│   └── query_expander.py     # Follow-up query resolution
+│   ├── chunker.py            # Document loading (PDF, DOCX, text) and chunking
+│   ├── embedder.py           # sentence-transformers wrapper (single + batch)
+│   ├── retriever.py          # ChromaDB client, ingestion, cosine retrieval
+│   ├── bm25_index.py         # In-memory BM25 index — tokenize, build, search
+│   ├── prompt_builder.py     # Assembles context + summary + history + query
+│   ├── query_expander.py     # Resolves vague follow-ups using history context
+│   └── memory.py             # Two-layer conversation memory manager
 │
 ├── llm/
-│   └── ollama_llm.py         # Ollama LLM integration (streaming + generate)
+│   ├── base.py               # Abstract BaseLLM interface (generate + stream)
+│   └── ollama_llm.py         # Concrete Ollama implementation
 │
-└── data/
-    └── documents/             # Knowledge base source files
+├── tests/
+│   ├── __init__.py
+│   ├── test_chunker.py       # 18 tests — clean_text, split_text, load_and_chunk
+│   ├── test_bm25.py          # 14 tests — tokenize, build, search, scoring
+│   └── test_prompt_builder.py # 14 tests — sections, ordering, summary handling
+│
+├── data/
+│   └── documents/            # Drop knowledge base files here
+│
+├── logs/
+│   └── rag_chat.log          # Auto-generated — DEBUG level, persistent
+│
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+├── requirements-dev.txt
+├── .env.example
+└── .gitignore
 ```
 
 ---
@@ -119,100 +201,215 @@ rag_chatbot_system/
 
 ### Prerequisites
 
-- Python 3.11 or higher
+- Python 3.11+
 - [Ollama](https://ollama.com) installed
 
-### Setup
+### Clone and install
 
 ```bash
-# Clone the repository
 git clone https://github.com/ananya489/Rag_Chatbot_System.git
 cd Rag_Chatbot_System
 
-# Create and activate a virtual environment
 python -m venv venv
-source venv/bin/activate      # On Windows: venv\Scripts\activate
+source venv/bin/activate        # Windows: venv\Scripts\activate
 
-# Install dependencies
 pip install -r requirements.txt
+pip install -r requirements-dev.txt   # for running tests
 ```
 
 ---
 
-## Running Locally
+## Configuration
 
-**1. Start Ollama and pull the model**
+Copy the example environment file and edit as needed:
+
+```bash
+cp .env.example .env
+```
+
+`.env.example` contents:
+
+```env
+LLM_PROVIDER=ollama
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=qwen2.5:7b
+LLM_TEMPERATURE=0.7
+LLM_MAX_TOKENS=1024
+```
+
+All other settings (chunk size, retrieval top-K, memory thresholds, domain list) live in `config.py` with inline documentation.
+
+---
+
+## Running the Project
+
+**1. Start Ollama**
 
 ```bash
 ollama serve
 ollama pull qwen2.5:7b
 ```
 
-**2. Launch the application**
+**2. Add documents** (optional — you can also upload from the UI)
+
+```bash
+cp your_file.pdf data/documents/
+```
+
+**3. Start the app**
 
 ```bash
 streamlit run app.py
 ```
 
-**3. Open your browser**
+Open `http://localhost:8501`.
 
-Navigate to `http://localhost:8501`
-
----
-
-## Docker Deployment
-
-The project includes a full container setup with separate services for the application and the Ollama LLM backend.
+### Docker
 
 ```bash
 docker compose up --build
+docker exec -it <ollama_container> ollama pull qwen2.5:7b
 ```
 
-This starts two containers:
-
-- **`ollama`** — runs the Ollama inference server, exposing port `11434`. Model weights persist in a named volume across restarts.
-- **`app`** — runs the Streamlit application on port `8501`, connected to the Ollama container over the internal Docker network.
-
-After the containers are running, pull the model into the Ollama container once:
-
-```bash
-docker exec -it <ollama_container_name> ollama pull qwen2.5:7b
-```
-
-Then open `http://localhost:8501` in your browser.
+Open `http://localhost:8501`.
 
 ---
 
-## How to Use
+## Hybrid Retrieval Pipeline
 
-1. **Upload a document** — open the "Upload document" panel in the sidebar and add a PDF, TXT, MD, PY, CSV, or HTML file
-2. **Wait for indexing** — the file is chunked, embedded, and stored in ChromaDB automatically; a confirmation message appears once complete
-3. **Ask questions** — type a question about your document in the chat box and receive a streamed, grounded answer
-4. **View sources** — expand the "Sources" panel under any answer to see which document chunks (and page numbers, for PDFs) were used to generate it
+Standard RAG uses only vector similarity. This project combines two retrieval strategies and fuses them using Reciprocal Rank Fusion:
 
-## Example Questions
+**Semantic search (ChromaDB)**
+Documents and queries are embedded into 384-dimensional vectors using `all-MiniLM-L6-v2`. ChromaDB returns the top-K nearest chunks by cosine similarity. This finds semantically similar content even when the wording differs from the query.
 
-Once a document is indexed, try asking:
+**BM25 keyword search**
+An in-memory BM25 index is built from all chunks at startup. BM25 scores documents using TF-IDF weighting with document length normalization. This finds exact keyword and rare-term matches that semantic search misses.
 
-- "What is this document about?"
-- "Summarize this paper."
-- "Explain the important points."
-- "What does it say about [specific topic]?"
-- "Can you elaborate on the second point you mentioned?"
+**Reciprocal Rank Fusion**
+Both result lists are merged by rank position (not raw score) using the formula:
+
+```
+rrf_score = semantic_weight / (k + rank_s) + bm25_weight / (k + rank_b)
+```
+
+Where `k=60` (Cormack et al., 2009 standard). This is scale-independent — cosine similarities and BM25 scores are never compared directly. Each retrieved chunk carries a `retrieval_method` field (`hybrid`, `bm25`, or `semantic`) visible in the sources expander.
+
+---
+
+## Conversation Memory
+
+Long conversations overflow the LLM context window if full history is sent every turn. This project implements a two-layer memory system:
+
+**Layer 1 — Compression (older turns)**
+When a session exceeds `SUMMARY_THRESHOLD` turns, all messages older than the recency window are compressed into a single summary paragraph by the LLM. The summary is stored in SQLite and reused on subsequent turns until new messages push more content beyond the boundary.
+
+**Layer 2 — Verbatim (recent turns)**
+The most recent `RECENT_TURNS_KEEP` turns (configurable, default 3) are always kept verbatim. These provide the immediate conversational context the LLM needs for follow-up questions.
+
+**Prompt structure:**
+```
+[System + grounding] → [Context chunks] → [Summary] → [Recent turns] → [Question] → Answer:
+```
+
+---
+
+## Multi-Domain Knowledge Base
+
+Each domain maps to an isolated ChromaDB collection:
+
+| Domain | Collection name |
+|---|---|
+| General | `domain_general` |
+| HR | `domain_hr` |
+| Finance | `domain_finance` |
+| Legal | `domain_legal` |
+| Education | `domain_education` |
+| Customer Support | `domain_customer_support` |
+
+Select a domain in the sidebar before uploading. To search across all domains simultaneously, select "All Domains" — results from every collection are merged and re-sorted by RRF score.
+
+---
+
+## Logging
+
+All modules use Python's `logging` module via a central `logger.py` configuration:
+
+- **Console (stdout):** INFO and above — clean, timestamped output during development
+- **File (`logs/rag_chat.log`):** DEBUG and above — full detail for post-mortem debugging
+
+Log format:
+```
+2025-07-05 14:23:11 | INFO     | rag_chat.rag.retriever | 'General' | fetched=5 | returned=3
+2025-07-05 14:23:11 | INFO     | rag_chat.rag.prompt_builder | chunks=3 | recent_turns=4 | has_summary=yes
+```
+
+No `print()` calls exist in the codebase — every log line carries a timestamp, severity, and module name.
+
+---
+
+## Testing
+
+```bash
+# Run all tests
+pytest tests/ -v
+
+# With coverage report
+pytest tests/ --cov=rag --cov-report=term-missing
+
+# Single module
+pytest tests/test_bm25.py -v
+```
+
+Test coverage:
+
+| File | Tests | What is covered |
+|---|---|---|
+| `test_chunker.py` | 18 | `clean_text`, `split_text`, `load_text_document`, `load_and_chunk` |
+| `test_bm25.py` | 14 | `tokenize`, `BM25Index.build`, `BM25Index.search`, scoring correctness |
+| `test_prompt_builder.py` | 14 | Section ordering, summary inclusion, grounding instructions |
+
+---
+
+## Screenshots
+
+> Add screenshots after running the app locally.
+
+| Chat Interface | Source Citations | Analytics |
+|---|---|---|
+| `screenshots/chat.png` | `screenshots/sources.png` | `screenshots/analytics.png` |
 
 ---
 
 ## Future Improvements
 
-- [ ] User authentication and access control
-- [ ] Cloud deployment (AWS / GCP / Azure)
-- [ ] Improved retrieval re-ranking with cross-encoder models
-- [ ] Multi-user support with isolated knowledge bases
-- [ ] Hybrid search combining keyword and semantic retrieval
-- [ ] OCR support for scanned PDFs
+- [ ] OCR support for scanned PDFs via pytesseract
+- [ ] Cross-encoder re-ranking for higher retrieval precision
+- [ ] User authentication and per-user knowledge bases
+- [ ] Cloud deployment guide (AWS / GCP / Render)
+- [ ] Hybrid search weight tuning via UI slider
+- [ ] Streaming summarization for very long sessions
+
+---
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feat/your-feature`
+3. Commit with a conventional commit message: `git commit -m "feat: add X"`
+4. Push and open a pull request
+
+Please run `pytest tests/` before submitting a PR.
 
 ---
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+MIT License — see [LICENSE](LICENSE) for details.
+
+---
+
+## Author
+
+**Ananya** · [@ananya489](https://github.com/ananya489)
+
+Built as a B.Tech CSE internship evaluation project, incrementally developed into a production-grade RAG system covering hybrid retrieval, vector databases, local LLM integration, conversation memory management, and software engineering best practices.
