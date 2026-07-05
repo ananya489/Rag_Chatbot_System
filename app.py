@@ -24,7 +24,9 @@ from rag.bm25_index import BM25Index
 from rag.prompt_builder import build_prompt
 from rag.query_expander import expand_query
 from llm.ollama_llm import OllamaLLM
+from logger import get_logger
 
+log = get_logger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -75,21 +77,19 @@ def load_resources():
 
     # Fingerprint-based ingestion cache — skip if documents unchanged
     if needs_reingestion(client, str(config.DOCUMENTS_DIR)):
-        print("[app] Documents changed — re-ingesting...")
+        log.info("Documents changed — re-ingesting...")
         chunks = load_and_chunk()
         if chunks:
             ingest_chunks(chunks, model, client)
         else:
-            print("[app] No documents found in", config.DOCUMENTS_DIR)
-    else:
-        print("[app] Documents unchanged — skipping ingestion.")
-
+            log.warning("No documents found in %s", config.DOCUMENTS_DIR)
+        log.info("Documents unchanged — skipping ingestion.")
     # Build BM25 index for every domain that already has documents
     bm25_indexes: dict[str, BM25Index] = {}
     for domain in config.DOMAINS:
         collection = get_or_create_collection(client, domain)
         if collection.count() > 0:
-            print(f"[app] Building BM25 index for domain: {domain}")
+            log.info("Building BM25 index for domain: %s", domain)
             bm25_indexes[domain] = build_bm25_index_for_domain(client, domain)
 
     return model, client, llm, bm25_indexes   # ← 4 values

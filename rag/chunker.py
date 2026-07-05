@@ -2,8 +2,9 @@ import re
 from pathlib import Path
 
 import config
+from logger import get_logger
 
-
+log = get_logger(__name__)
 # ── Supported file types ──────────────────────────────────────────────────────
 
 TEXT_EXTENSIONS = {".txt", ".md", ".py", ".csv", ".html"}
@@ -34,7 +35,7 @@ def load_docx(file_path: Path) -> dict | None:
     try:
         from docx import Document   # Late import — only used for .docx files
     except ImportError:
-        print("[chunker] python-docx not installed. Run: pip install python-docx==1.1.2")
+        log.error("python-docx not installed. Run: pip install python-docx==1.1.2")
         return None
 
     try:
@@ -50,14 +51,14 @@ def load_docx(file_path: Path) -> dict | None:
         text = "\n".join(lines).strip()
 
         if not text:
-            print(f"[chunker] No extractable text in {file_path.name} (empty document).")
+            log.warning("No extractable text in %s (empty document).", file_path.name)
             return None
 
-        print(f"[chunker] Loaded DOCX: {file_path.name} | chars: {len(text)}")
+        log.info("Loaded DOCX: %s | chars: %d", file_path.name, len(text))
         return {"text": text, "source": file_path.name}
 
     except Exception as e:
-        print(f"[chunker] Failed loading {file_path.name}: {e}")
+        log.error("Failed loading %s: %s", file_path.name, str(e))
         return None
 
 
@@ -79,15 +80,14 @@ def load_pdf(file_path: Path) -> list[dict]:
     try:
         from pypdf import PdfReader
     except ImportError:
-        print("[chunker] pypdf not installed. Run: pip install pypdf==4.3.1")
+        log.error("pypdf not installed. Run: pip install pypdf==4.3.1")
         return []
 
     pages = []
     try:
         reader     = PdfReader(str(file_path))
         page_count = len(reader.pages)
-        print(f"[chunker] Loaded PDF: {file_path.name} | pages: {page_count}")
-
+        log.info("Loaded PDF: %s | pages: %d", file_path.name, page_count)
         for page_num, page in enumerate(reader.pages, start=1):
             try:
                 text = (page.extract_text() or "").strip()
@@ -98,17 +98,21 @@ def load_pdf(file_path: Path) -> list[dict]:
                         "page":   page_num,
                     })
             except Exception as page_err:
-                print(f"[chunker] Skipping page {page_num} of {file_path.name}: {page_err}")
+                log.warning(
+    "Skipping page %d of %s: %s",
+    page_num,
+    file_path.name,
+    str(page_err),
+)
 
         if not pages:
-            print(
-                f"[chunker] No extractable text in {file_path.name}. "
-                "It may be a scanned PDF — OCR is not yet supported."
-            )
+            log.warning(
+    "No extractable text in %s. It may be a scanned PDF — OCR is not yet supported.",
+    file_path.name,
+)
 
     except Exception as e:
-        print(f"[chunker] Failed loading {file_path.name}: {e}")
-
+        log.error("Failed loading %s: %s", file_path.name, str(e))
     return pages
 
 
@@ -131,11 +135,11 @@ def load_text_document(file_path: Path) -> dict | None:
         if not text:
             return None
 
-        print(f"[chunker] Loaded: {file_path.name} | chars: {len(text)}")
+        log.info("Loaded: %s | chars: %d", file_path.name, len(text))
         return {"text": text, "source": file_path.name}
 
     except Exception as e:
-        print(f"[chunker] Skipping {file_path.name}: {e}")
+        log.warning("Skipping %s: %s", file_path.name, str(e))
         return None
 
 
@@ -159,7 +163,7 @@ def load_all_documents(documents_path: Path) -> list[dict]:
     documents_path = Path(documents_path)
 
     if not documents_path.exists():
-        print(f"[chunker] Documents directory not found: {documents_path}")
+        log.warning("Documents directory not found: %s", documents_path)
         return []
 
     all_docs: list[dict] = []
@@ -202,7 +206,18 @@ def clean_text(text: str) -> str:
     text = text.replace("\t", " ")
     lines = [line.rstrip() for line in text.split("\n")]
     return "\n".join(lines).strip()
+# ── Test helper ───────────────────────────────────────────────────────────────
 
+def tokenize_for_test(text: str) -> list[str]:
+    """
+    Helper used only by unit tests.
+
+    Tokenizes text into lowercase alphanumeric tokens.
+    """
+    if not text:
+        return []
+
+    return re.findall(r"\b[a-z0-9]+\b", text.lower())
 
 # ── Recursive text splitter ───────────────────────────────────────────────────
 
@@ -272,7 +287,7 @@ def load_and_chunk(
     raw_docs = load_all_documents(path)
 
     if not raw_docs:
-        print("[chunker] No documents found. Add files to data/documents/")
+        log.warning("No documents found. Add files to data/documents/")
         return []
 
     all_chunks: list[dict] = []
@@ -299,5 +314,5 @@ def load_and_chunk(
                 })
 
     doc_count = len({d["source"] for d in raw_docs})
-    print(f"[chunker] {doc_count} document(s) → {len(all_chunks)} chunks")
+    log.info("%d document(s) → %d chunks", doc_count, len(all_chunks))
     return all_chunks

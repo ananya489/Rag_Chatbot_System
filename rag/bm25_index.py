@@ -2,7 +2,9 @@ import re
 import math
 from collections import Counter
 from dataclasses import dataclass, field
+from logger import get_logger
 
+log = get_logger(__name__)
 
 # ── Tokenizer ─────────────────────────────────────────────────────────────────
 
@@ -137,8 +139,11 @@ class BM25Index:
             for term, df in self.doc_freqs.items()
         }
 
-        print(f"[bm25] Index built: {self.n_docs} chunks, "
-              f"{len(self.idf)} unique terms")
+        log.info(
+    "Index built: %d chunks, %d unique terms",
+    self.n_docs,
+    len(self.idf),
+)
         return self
 
     def search(self, query: str, top_k: int = 10) -> list[dict]:

@@ -9,7 +9,9 @@ from sentence_transformers import SentenceTransformer
 from rag.embedder import embed_text, embed_batch
 import config
 from rag.bm25_index import BM25Index
+from logger import get_logger
 
+log = get_logger(__name__)
 # ── Client ────────────────────────────────────────────────────────────────────
 
 def get_chroma_client() -> chromadb.PersistentClient:
@@ -113,10 +115,17 @@ def needs_reingestion(
     )
 
     if current_fp == stored_fp:
-        print(f"[cache] Domain '{domain}' fingerprint match — skipping ingestion.")
+        log.info(
+    "Fingerprint match (%s...) — skipping ingestion.",
+    current_fp[:8],
+)
         return False
 
-    print(f"[cache] Domain '{domain}' fingerprint changed — re-ingesting.")
+    log.info(
+    "Fingerprint changed: %s... → %s...",
+    stored_fp[:8] or "none",
+    current_fp[:8],
+)
     return True
 
 # ── Ingestion ─────────────────────────────────────────────────────────────────
@@ -143,7 +152,10 @@ def ingest_chunks(
         Number of new chunks stored.
     """
     if not chunks:
-        print(f"[retriever] No chunks to ingest for domain '{domain}'.")
+        log.warning(
+    "No chunks to ingest for domain '%s'.",
+    domain,
+)
         return 0
 
     collection = get_or_create_collection(client, domain)
@@ -151,10 +163,18 @@ def ingest_chunks(
     new_chunks = [c for c in chunks if c["chunk_id"] not in existing]
 
     if not new_chunks:
-        print(f"[retriever] All {len(chunks)} chunks already indexed in '{domain}'.")
+        log.info(
+    "All %d chunks already indexed in '%s'.",
+    len(chunks),
+    domain,
+)
         return 0
 
-    print(f"[retriever] Ingesting {len(new_chunks)} new chunks into '{domain}'...")
+    log.info(
+    "Ingesting %d new chunks into '%s'...",
+    len(new_chunks),
+    domain,
+)
 
     texts     = [c["text"]     for c in new_chunks]
     ids       = [c["chunk_id"] for c in new_chunks]
@@ -183,10 +203,12 @@ def ingest_chunks(
     except Exception:
         pass
 
-    print(
-        f"[retriever] Stored {len(new_chunks)} chunks in '{domain}'. "
-        f"Collection total: {collection.count()}"
-    )
+    log.info(
+    "Stored %d chunks in '%s'. Collection total: %d",
+    len(new_chunks),
+    domain,
+    collection.count(),
+)
     return len(new_chunks)
 
 
@@ -224,7 +246,10 @@ def retrieve(
     collection = get_or_create_collection(client, domain)
 
     if collection.count() == 0:
-        print(f"[retriever] Domain '{domain}' is empty — nothing to search.")
+        log.warning(
+    "Domain '%s' is empty — nothing to search.",
+    domain,
+)
         return []
 
     query_vector = embed_text(model, query)
@@ -258,10 +283,12 @@ def retrieve(
     )
     final = ranked[:top_n]
 
-    print(
-        f"[retriever] '{domain}' | query='{query[:40]}...' | "
-        f"fetched={len(candidates)} | returned={len(final)}"
-    )
+    log.info(
+    "'%s' | fetched=%d | returned=%d",
+    domain,
+    len(candidates),
+    len(final),
+)
     return final
 
 
@@ -291,7 +318,7 @@ def retrieve_all_domains(
     domains = list_all_collections(client)
 
     if not domains:
-        print("[retriever] No domain collections found.")
+        log.warning("No domain collections found.")
         return []
 
     for domain in domains:
@@ -300,7 +327,11 @@ def retrieve_all_domains(
 
     # Re-sort the merged results so best chunks are always first
     merged = sorted(all_chunks, key=lambda x: x["score"], reverse=True)
-    print(f"[retriever] All-domain search: {len(merged)} chunks from {len(domains)} domains")
+    log.info(
+    "All-domain search: %d chunks from %d domains",
+    len(merged),
+    len(domains),
+)
     return merged[:top_n * 2]   # Return a generous window across domains
 
 
@@ -324,7 +355,11 @@ def save_uploaded_file(uploaded_file, documents_path: Path) -> Path:
     with open(destination, "wb") as f:
         f.write(uploaded_file.getbuffer())
 
-    print(f"[upload] Saved: {destination.name} ({destination.stat().st_size} bytes)")
+    log.info(
+    "Saved: %s (%d bytes)",
+    destination.name,
+    destination.stat().st_size,
+)
     return destination
 
 
@@ -354,7 +389,10 @@ def ingest_uploaded_file(
         raw_docs = [doc] if doc else []
 
     if not raw_docs:
-        print(f"[upload] No extractable content in {saved_path.name}")
+        log.warning(
+    "No extractable content in %s",
+    saved_path.name,
+)
         return 0
 
     chunks = []
@@ -501,32 +539,36 @@ def hybrid_retrieve(
 
     # Step 2: BM25 retrieval (keyword search)
     if bm25_index.is_empty():
-        print(f"[hybrid] BM25 index empty for '{domain}' — using semantic only.")
-        for chunk in semantic_chunks:
+       log.warning(
+    "BM25 index empty for '%s' — using semantic only.",
+    domain,
+)
+       for chunk in semantic_chunks:
             chunk["retrieval_method"] = "semantic"
-        return semantic_chunks[:top_n]
+            return semantic_chunks[:top_n]
 
     bm25_chunks = bm25_index.search(query, top_k=top_k)
 
     # Step 3: Fuse results
     fused = reciprocal_rank_fusion(semantic_chunks, bm25_chunks)
 
-    print(
-        f"[hybrid] Domain '{domain}' | "
-        f"semantic={len(semantic_chunks)} | "
-        f"bm25={len(bm25_chunks)} | "
-        f"fused={len(fused)} | "
-        f"returning={min(top_n, len(fused))}"
-    )
+    log.info(
+    "Domain '%s' | semantic=%d | bm25=%d | fused=%d | returning=%d",
+    domain,
+    len(semantic_chunks),
+    len(bm25_chunks),
+    len(fused),
+    min(top_n, len(fused)),
+)
 
     # Log retrieval methods for debug visibility
-    for chunk in fused[:top_n]:
-        print(
-            f"  [{chunk['retrieval_method']:8}] "
-            f"score={chunk['score']:.5f} | "
-            f"source={chunk['source']} | "
-            f"preview={chunk['text'][:50]}..."
-        )
+    log.debug(
+    "[%s] score=%.5f | source=%s | preview=%s...",
+    chunk["retrieval_method"],
+    chunk["score"],
+    chunk["source"],
+    chunk["text"][:50],
+)
 
     return fused[:top_n]
 
@@ -559,7 +601,7 @@ def hybrid_retrieve_all_domains(
     domains = list_all_collections(client)
 
     if not domains:
-        print("[hybrid] No domain collections found.")
+        log.warning("No domain collections found.")
         return []
 
     for domain in domains:
@@ -570,7 +612,11 @@ def hybrid_retrieve_all_domains(
         all_chunks.extend(chunks)
 
     merged = sorted(all_chunks, key=lambda x: x["score"], reverse=True)
-    print(f"[hybrid] All-domain: {len(merged)} chunks from {len(domains)} domains")
+    log.info(
+    "All-domain: %d chunks from %d domains",
+    len(merged),
+    len(domains),
+)
     return merged[:top_n * 2]
 
 
@@ -600,7 +646,10 @@ def build_bm25_index_for_domain(
     collection = get_or_create_collection(client, domain)
 
     if collection.count() == 0:
-        print(f"[bm25] Domain '{domain}' is empty — returning empty index.")
+        log.warning(
+    "Domain '%s' is empty — returning empty index.",
+    domain,
+)
         return BM25Index()
 
     # Fetch all stored documents and their metadata from ChromaDB

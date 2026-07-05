@@ -15,6 +15,8 @@ preserving the full arc of the conversation in the summary.
 
 import config
 import database
+from logger import get_logger
+log = get_logger(__name__)
 
 
 # ── Summary prompt ────────────────────────────────────────────────────────────
@@ -74,7 +76,7 @@ def _call_llm_for_summary(prompt: str, llm) -> str:
         summary = llm.generate(prompt)
         return summary.strip()
     except Exception as e:
-        print(f"[memory] Summary generation failed: {e}")
+        log.error("Summary generation failed: %s", str(e))
         return ""
 
 
@@ -211,10 +213,10 @@ class ConversationMemory:
         if not self._needs_summarization():
             recent = [{"role": m["role"], "content": m["content"]}
                       for m in all_messages]
-            print(
-                f"[memory] Session short ({len(all_messages)} msgs) "
-                "— sending full history."
-            )
+            log.debug(
+    "Session short (%d msgs) — sending full history.",
+    len(all_messages),
+)
             return {"summary": "", "recent": recent}
 
         split        = self._get_split_point(all_messages)
@@ -229,18 +231,18 @@ class ConversationMemory:
 
         if not self._should_update_summary(existing, all_messages):
             # Existing summary is fresh — use it
-            print(
-                f"[memory] Using cached summary "
-                f"(covers up to msg id {existing['summarized_up_to_id']})."
-            )
+            log.info(
+    "Using cached summary (covers up to msg id %d).",
+    existing["summarized_up_to_id"],
+)
             summary_text = existing["summary"][:config.SUMMARY_MAX_CHARS]
             return {"summary": summary_text, "recent": recent}
 
         # Summary is stale or missing — regenerate
-        print(
-            f"[memory] Generating summary for "
-            f"{len(old_messages)} old messages..."
-        )
+        log.info(
+    "Generating summary for %d old messages...",
+    len(old_messages),
+)
 
         if not old_messages:
             return {"summary": "", "recent": recent}
@@ -257,14 +259,16 @@ class ConversationMemory:
             # Persist so we don't regenerate on every turn
             highest_id = max(m["id"] for m in old_messages)
             database.save_summary(self.session_id, summary_text, highest_id)
-            print(
-                f"[memory] Summary saved "
-                f"(up to msg id {highest_id}, "
-                f"{len(summary_text)} chars)."
-            )
+            log.info(
+    "Summary saved (up to msg id %d, %d chars).",
+    highest_id,
+    len(summary_text),
+)
         else:
             # LLM failed to generate — fall back to raw old history
-            print("[memory] Summary generation failed — using raw old history.")
+            log.warning(
+    "Summary generation failed — falling back to raw old history."
+)
             raw_old = [{"role": m["role"], "content": m["content"]}
                        for m in old_messages]
             return {"summary": "", "recent": raw_old + recent}
