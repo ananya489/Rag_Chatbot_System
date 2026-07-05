@@ -368,17 +368,6 @@ Test coverage:
 | `test_bm25.py` | 14 | `tokenize`, `BM25Index.build`, `BM25Index.search`, scoring correctness |
 | `test_prompt_builder.py` | 14 | Section ordering, summary inclusion, grounding instructions |
 
----
-
-## Screenshots
-
-> Add screenshots after running the app locally.
-
-| Chat Interface | Source Citations | Analytics |
-|---|---|---|
-| `screenshots/chat.png` | `screenshots/sources.png` | `screenshots/analytics.png` |
-
----
 
 ## Future Improvements
 
