@@ -123,68 +123,66 @@ def format_history(history:list[dict]) -> str:
 # -------------------------------------------------
 
 def build_prompt(
-        chunks:list[dict],
-        history:list[dict],
-        query:str
-):
+    chunks:  list[dict],
+    history: list[dict],
+    query:   str,
+    summary: str = "",          # ← new optional parameter
+) -> str:
+    """
+    Assemble the complete prompt from all inputs.
 
+    Structure (in order):
+        1. System role + grounding instruction
+        2. Retrieved context chunks with source labels
+        3. Conversation summary (if present)
+        4. Recent conversation turns (verbatim)
+        5. Current user question + "Answer:" primer
 
-    context = format_context(chunks)
+    Args:
+        chunks:  Retrieved and re-ranked chunks from retriever.
+        history: Recent message turns to include verbatim.
+        query:   The current user question.
+        summary: Optional compressed summary of older turns.
+                 Empty string means no summary section is added.
 
+    Returns:
+        A single formatted string ready to send to any LLM.
+    """
+    context_block = format_context(chunks)
+    history_block = format_history(history)
 
-    history_text = format_history(history)
+    sections = [SYSTEM_PROMPT]
 
+    sections.append("--- CONTEXT DOCUMENTS ---\n" + context_block)
 
-
-    sections=[
-
-        SYSTEM_PROMPT,
-
-        "--- CONTEXT DOCUMENTS ---\n"
-        + context
-
-    ]
-
-
-
-    if history_text:
-
-
+    # Include summary before recent history if one exists
+    if summary.strip():
         sections.append(
-
-            "--- CONVERSATION HISTORY ---\n"
-            + history_text
-
+            "--- CONVERSATION SUMMARY ---\n"
+            "The following is a summary of the earlier conversation:\n\n"
+            + summary.strip()
         )
 
-
+    if history_block:
+        sections.append(
+            "--- RECENT CONVERSATION ---\n" + history_block
+        )
 
     sections.append(
-
         "--- CURRENT QUESTION ---\n"
-
         f"Question: {query.strip()}\n\n"
-
         "Answer:"
-
     )
 
-
-
-    prompt="\n\n".join(sections)
-
-
+    prompt = "\n\n".join(sections)
 
     print(
-
-        f"[prompt_builder] Prompt assembled | "
+        f"[prompt_builder] Assembled | "
         f"chunks={len(chunks)} | "
-        f"history_turns={len(history)} | "
+        f"recent_turns={len(history)} | "
+        f"has_summary={'yes' if summary.strip() else 'no'} | "
         f"total_chars={len(prompt)}"
-
     )
-
-
 
     return prompt
 

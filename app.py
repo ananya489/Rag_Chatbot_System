@@ -7,6 +7,7 @@ import database
 import analytics
 
 from rag.chunker import load_and_chunk
+from rag.memory import ConversationMemory
 from rag.embedder import load_embedder
 from rag.retriever import (
     get_chroma_client,
@@ -161,32 +162,25 @@ def export_session_markdown(session_id: str, title: str) -> str:
 
 def process_query_stream(query: str, model, client, llm: OllamaLLM):
     """
-    Execute the full RAG pipeline for one user message, streaming tokens.
+    Execute the full RAG pipeline with two-layer conversation memory.
 
-    Pipeline (runs exactly once per call):
-        1. Load recent chat history from SQLite
-        2. Expand vague follow-up queries using history context
-        3. Hybrid retrieval — BM25 + semantic via Reciprocal Rank Fusion
-        4. Build the structured prompt
-        5. Stream tokens from Ollama
-        6. Persist both turns to SQLite
-        7. Log analytics (response time, source count)
-        8. Auto-title the session from the first user message
-
-    Yields:
-        str: Individual tokens from the LLM response stream.
+    Memory pipeline:
+        ConversationMemory decides whether to summarize old turns.
+        Short sessions → full history sent verbatim.
+        Long sessions  → summary of old turns + recent turns verbatim.
     """
     sid          = st.session_state.session_id
     domain       = st.session_state.get("active_domain", config.DEFAULT_DOMAIN)
     bm25_indexes = st.session_state.get("bm25_indexes", {})
 
-    # Step 1 — Chat history
-    history = database.get_history(sid)
+    # Step 1 — Two-layer memory context
+    memory  = ConversationMemory(sid, llm)
+    context = memory.get_memory_context()
 
-    # Step 2 — Query expansion
-    expanded_query = expand_query(query, history)
+    # Step 2 — Query expansion (uses recent turns only — not summary)
+    expanded_query = expand_query(query, context["recent"])
 
-    # Step 3 — Hybrid retrieval (single execution path)
+    # Step 3 — Hybrid retrieval
     if domain == "All Domains":
         chunks = hybrid_retrieve_all_domains(
             expanded_query, model, client, bm25_indexes
@@ -197,16 +191,21 @@ def process_query_stream(query: str, model, client, llm: OllamaLLM):
             expanded_query, model, client, bm25_index, domain=domain
         )
 
-    # Step 4 — Prompt assembly
-    prompt = build_prompt(chunks, history, query)
+    # Step 4 — Prompt with summary layer
+    prompt = build_prompt(
+        chunks,
+        context["recent"],      # ← verbatim recent turns only
+        query,
+        summary=context["summary"],  # ← compressed older turns
+    )
 
     # Step 5 — Stream tokens
-    start: float          = _time.time()
-    collected_tokens: list[str] = []
+    start:            float      = _time.time()
+    collected_tokens: list[str]  = []
 
     for token in llm.stream(prompt):
         collected_tokens.append(token)
-        yield token                         # renders in real time via st.write_stream
+        yield token
 
     elapsed_ms = int((_time.time() - start) * 1000)
     answer     = "".join(collected_tokens)
@@ -230,7 +229,7 @@ def process_query_stream(query: str, model, client, llm: OllamaLLM):
     # Step 7 — Analytics
     analytics.log_query(sid, elapsed_ms, chunks)
 
-    # Step 8 — Auto-title from first message
+    # Step 8 — Auto-title
     sessions = database.list_sessions()
     current  = next((s for s in sessions if s["session_id"] == sid), None)
     if current and current["title"] == "New chat":
@@ -240,8 +239,6 @@ def process_query_stream(query: str, model, client, llm: OllamaLLM):
 
     st.session_state.sessions_list = database.list_sessions()
     st.session_state.last_chunks   = chunks
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # UPLOAD WIDGET
 # ─────────────────────────────────────────────────────────────────────────────

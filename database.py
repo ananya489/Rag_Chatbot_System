@@ -62,28 +62,23 @@ def init_db() -> None:
             updated_at INTEGER NOT NULL
 
         );
+         CREATE TABLE IF NOT EXISTS messages (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id  TEXT NOT NULL,
+        role        TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+        content     TEXT NOT NULL,
+        sources     TEXT NOT NULL DEFAULT '[]',
+        timestamp   INTEGER NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+    );
 
-
-        CREATE TABLE IF NOT EXISTS messages (
-
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-            session_id TEXT NOT NULL,
-
-            role TEXT NOT NULL
-                CHECK(role IN ('user','assistant')),
-
-            content TEXT NOT NULL,
-
-            sources TEXT NOT NULL DEFAULT '[]',
-
-            timestamp INTEGER NOT NULL,
-
-            FOREIGN KEY(session_id)
-            REFERENCES sessions(session_id)
-
-        );
-
+        CREATE TABLE IF NOT EXISTS session_summaries (
+        session_id          TEXT PRIMARY KEY,
+        summary             TEXT NOT NULL,
+        summarized_up_to_id INTEGER NOT NULL,
+        updated_at          INTEGER NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+    );
 
         CREATE TABLE IF NOT EXISTS analytics (
 
@@ -324,4 +319,104 @@ def get_history(
 
         for row in reversed(rows)
 
+    ]
+
+def get_summary(session_id: str) -> dict | None:
+    """
+    Retrieve the current summary for a session.
+    """
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT summary, summarized_up_to_id, updated_at "
+            "FROM session_summaries WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+
+    return dict(row) if row else None
+
+
+def save_summary(
+    session_id: str,
+    summary: str,
+    summarized_up_to_id: int,
+) -> None:
+    """
+    Insert or replace a session summary.
+    """
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO session_summaries
+            (session_id, summary, summarized_up_to_id, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                summary,
+                summarized_up_to_id,
+                int(time.time()),
+            ),
+        )
+
+
+def get_messages_for_summary(
+    session_id: str,
+    up_to_id: int,
+) -> list[dict]:
+    """
+    Fetch all messages up to a given message ID.
+    """
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, role, content
+            FROM messages
+            WHERE session_id = ?
+            AND id <= ?
+            ORDER BY timestamp ASC
+            """,
+            (
+                session_id,
+                up_to_id,
+            ),
+        ).fetchall()
+
+    return [
+        {
+            "id": r["id"],
+            "role": r["role"],
+            "content": r["content"],
+        }
+        for r in rows
+    ]
+
+
+def get_recent_messages(
+    session_id: str,
+    after_id: int,
+) -> list[dict]:
+    """
+    Fetch all messages newer than a given message ID.
+    """
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT role, content
+            FROM messages
+            WHERE session_id = ?
+            AND id > ?
+            ORDER BY timestamp ASC
+            """,
+            (
+                session_id,
+                after_id,
+            ),
+        ).fetchall()
+
+    return [
+        {
+            "role": r["role"],
+            "content": r["content"],
+        }
+        for r in rows
     ]

@@ -89,3 +89,18 @@ BM25_WEIGHT: float = 0.4
 # k=60 is the standard value from the original RRF paper (Cormack et al. 2009).
 # Higher k reduces the advantage of top-ranked results.
 RRF_K: int = 60
+
+# ── Conversation memory ───────────────────────────────────────────────────────
+
+# Number of most-recent turns kept verbatim in the prompt.
+# Turns older than this are compressed into a summary.
+# A "turn" = 1 user message + 1 assistant message = 2 rows in messages table.
+RECENT_TURNS_KEEP: int = 3        # Keep last 3 turns (6 messages) verbatim
+
+# Minimum number of turns before summarization kicks in.
+# Below this threshold we send full history — no summary needed yet.
+SUMMARY_THRESHOLD: int = 6        # Start summarizing after 6 turns (12 messages)
+
+# Max characters of the summary included in the prompt.
+# Keeps the summary from growing unbounded on very long sessions.
+SUMMARY_MAX_CHARS: int = 1000
