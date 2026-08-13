@@ -1,5 +1,6 @@
 # RAG Chatbot System
 
+
 > A locally-hosted, privacy-first Retrieval-Augmented Generation chat system. Ask questions about your own documents and receive answers grounded strictly in retrieved evidence — with hybrid BM25 + semantic search, multi-domain knowledge bases, persistent conversation memory, and streaming responses.
 
 ## Table of Contents
